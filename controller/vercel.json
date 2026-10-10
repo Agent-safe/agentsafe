@@ -1,4 +1,13 @@
 {
-  "buildCommand": "npm run build",
-  "functions": {"app.py": {"maxDuration": 300, "includeFiles": ["ui/**", "zk/**", "node_modules/**"]}}
+  "functions": {
+    "app.py": {
+      "maxDuration": 300,
+      "includeFiles": "ui/**",
+      "excludeFiles": "{node_modules/**,zk/**}"
+    },
+    "api/zk.mjs": {
+      "maxDuration": 300,
+      "includeFiles": "zk/**"
+    }
+  }
 }

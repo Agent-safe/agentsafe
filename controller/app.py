@@ -13,6 +13,9 @@ import os
 import secrets
 import sqlite3
 import subprocess
+import shutil
+import urllib.error
+import urllib.request
 import tempfile
 import time
 import uuid
@@ -44,7 +47,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("AGENTSAFE_DB", DATA_DIR / "agentsafe.sqlite3"))
 KEY_PATH = Path(os.environ.get("AGENTSAFE_SIGNING_KEY", DATA_DIR / "ed25519.key"))
 AUDIT_LOG_PATH = Path(os.environ.get("AGENTSAFE_AUDIT_LOG", DATA_DIR / "audit.log"))
-ZK_DIR = Path(os.environ.get("AGENTSAFE_ZK_DIR", ROOT.parent / "zk" if (ROOT.parent / "zk").exists() else ROOT / "zk"))
+ZK_DIR = Path(os.environ.get("AGENTSAFE_ZK_DIR", ROOT / "zk"))
+NODE_BIN = shutil.which("node") or str(ROOT / "node_modules" / "node" / "bin" / "node")
 @asynccontextmanager
 async def lifespan(_app):
     init_db()
@@ -152,8 +156,36 @@ def private_fingerprint(value: str | None) -> str | None:
 
 
 def zk_call(mode: str, payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+    if os.environ.get("VERCEL"):
+        deployment = os.environ.get("VERCEL_URL")
+        if not deployment:
+            raise RuntimeError("ZK service URL unavailable")
+        headers = {"Content-Type": "application/json"}
+        bypass = os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET")
+        if bypass:
+            headers["x-vercel-protection-bypass"] = bypass
+        request = urllib.request.Request(
+            f"https://{deployment}/api/zk",
+            data=canonical({"mode": mode, "payload": payload}),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                result = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read()).get("error", "request rejected")
+            except (json.JSONDecodeError, AttributeError):
+                detail = "request rejected"
+            raise RuntimeError(f"ZK service rejected request ({exc.code}): {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"ZK service request failed: {getattr(exc, 'reason', type(exc).__name__)}") from exc
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        return result
     try:
-        result = subprocess.run(["node", str(ZK_DIR / "tool.mjs"), mode], input=canonical(payload), capture_output=True, timeout=timeout, check=False)
+        result = subprocess.run([NODE_BIN, str(ZK_DIR / "tool.mjs"), mode], input=canonical(payload), capture_output=True, timeout=timeout, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("ZK tool unavailable; install zk dependencies and generate the local proving key") from exc
     try:
@@ -166,12 +198,17 @@ def zk_call(mode: str, payload: dict[str, Any], timeout: int = 120) -> dict[str,
 
 
 def verify_zk_proof_independently(proof: dict[str, Any]) -> bool:
+    if os.environ.get("VERCEL"):
+        try:
+            return zk_call("verify", proof).get("valid") is True
+        except RuntimeError:
+            return False
     verifier = ZK_DIR / "verify.mjs"
     with tempfile.NamedTemporaryFile("w", suffix=".json", dir=ZK_DIR, delete=False) as handle:
         json.dump(proof, handle, separators=(",", ":"))
         proof_path = Path(handle.name)
     try:
-        result = subprocess.run(["node", str(verifier), str(proof_path)], capture_output=True, text=True, timeout=60, check=False)
+        result = subprocess.run([NODE_BIN, str(verifier), str(proof_path)], capture_output=True, text=True, timeout=60, check=False)
         return result.returncode == 0 and json.loads(result.stdout).get("valid") is True
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return False
@@ -392,11 +429,14 @@ def health():
 
 @app.get("/zk/status")
 def zk_status():
+    error = None
     try:
         ready = zk_call("self-check", {}).get("setupReady") is True
-    except RuntimeError:
+    except RuntimeError as exc:
         ready = False
-    return {"ready": ready, "protocol": "Groth16/bn128", "circuit": "delegation-subset-v1", "setup": "local development only; not an audited production ceremony", "max_scope_entries": 8}
+        error = str(exc)
+    runtime = {"mode": "remote Node.js function", "endpoint": "/api/zk"} if os.environ.get("VERCEL") else {"node": NODE_BIN if Path(NODE_BIN).is_file() else None, "tool_present": (ZK_DIR / "tool.mjs").is_file(), "wasm_present": (ZK_DIR / "build/delegation_js/delegation.wasm").is_file(), "proving_key_present": (ZK_DIR / "build/delegation_final.zkey").is_file()}
+    return {"ready": ready, "protocol": "Groth16/bn128", "circuit": "delegation-subset-v1", "setup": "local development only; not an audited production ceremony", "max_scope_entries": 8, "runtime": runtime, "error": error}
 
 
 @app.get("/keys/public")
