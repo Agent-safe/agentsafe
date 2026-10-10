@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "AgentSafeRuntime",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "AgentSafeRuntime"
+  },
+  "runtimes": [
+    {
+      "name": "AgentSafeOrchestrator",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/AgentSafeOrchestrator",
+      "runtimeVersion": "PYTHON_3_13",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "envVars": [
+        { "name": "AWS_REGION", "value": "eu-north-1" },
+        { "name": "BEDROCK_MODEL_CHAIN", "value": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0,eu.anthropic.claude-haiku-4-5-20251001-v1:0,global.anthropic.claude-sonnet-4-6,mistral.devstral-2-123b" },
+        { "name": "BEDROCK_EMBEDDING_MODEL_ID", "value": "amazon.titan-embed-text-v2:0" },
+        { "name": "AGENTSAFE_OPENSEARCH_INDEX", "value": "agentsafe-policy-guidance" }
+      ],
+      "lifecycleConfiguration": {
+        "idleRuntimeSessionTimeout": 300,
+        "maxLifetime": 3600
+      }
+    }
+  ],
+  "memories": [],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "harnesses": [],
+  "datasets": [],
+  "capacityProviders": [],
+  "payments": []
+}

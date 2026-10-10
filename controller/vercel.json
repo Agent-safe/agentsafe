@@ -8,6 +8,9 @@
     "api/zk.mjs": {
       "maxDuration": 300,
       "includeFiles": "zk/**"
+    },
+    "api/agentcore.mjs": {
+      "maxDuration": 120
     }
   }
 }

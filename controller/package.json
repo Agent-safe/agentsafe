@@ -6,6 +6,8 @@
     "build": "node zk/setup.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "^3.1000.0",
+    "@aws-sdk/client-sts": "^3.1000.0",
     "circomlibjs": "0.1.7",
     "snarkjs": "0.7.6"
   },

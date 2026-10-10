@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "aws-agentcore/**",
+    "controller/zk/build/**",
+    "zk/build/**",
   ]),
 ]);
 

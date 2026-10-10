@@ -1,55 +1,63 @@
-# AgentSafe — spécification du MVP hackathon
+# AgentSafe Product Specification
 
-## Produit
+## Product
 
-AgentSafe est une couche de contrôle et d'audit installée dans l'environnement du client. Elle protège les opérations que l'entreprise choisit de couvrir : délégations, accès aux outils, budgets, transferts de données et procédures obligatoires. L'agent propose une action; le contrôleur vérifie le mandat avant d'appeler l'outil. Une action qui ne passe pas par le contrôleur n'est pas protégée.
+AgentSafe is a control and audit layer for existing AI agents. It governs mission-scoped permissions, delegation, tool access, budgets, data movement, and required approvals. An agent proposes an action; the controller checks the signed mandate before a protected connector can run. Actions that bypass the controller are outside the protection boundary.
 
-La console montre deux relations : **exécution** (agents, outils, transferts) et **autorisation** (qui a délégué quels droits). L'entreprise peut suspendre une mission ou révoquer un mandat; cela bloque les prochaines actions, sans annuler celles déjà exécutées.
+The console separates execution relationships (agents, tools, transfers) from authorization relationships (who delegated which rights). An operator can suspend a mission or revoke a mandate to stop future actions; revocation cannot undo completed actions.
 
-## Garanties visées par le prototype
+## Demo company
 
-- Une opération couverte est liée à une mission et à un mandat signé, limité par outil, ressource, budget, durée et délégation.
-- Une délégation ne peut pas augmenter le budget, étendre le périmètre, prolonger l'expiration, supprimer une restriction de données ou réactiver la délégation si le parent l'interdit.
-- Les limites de budget cumulées sont vérifiées et mises à jour atomiquement; un même identifiant de requête ne peut pas être rejoué.
-- Les sorties dérivées de données confidentielles restent confidentielles par défaut. Le contrôleur vérifie les destinations déclarées avant le transfert.
-- Une action nécessitant une approbation ou une preuve est bloquée si le justificatif correspondant à cette opération manque, est expiré ou a déjà été consommé.
-- La décision est durablement enregistrée avant l'exécution. L'échec d'écriture bloque l'action. Le résultat est enregistré séparément et peut être `unknown` si l'outil a répondu de manière ambiguë.
-- Les reçus signés attestent ce que le contrôleur a vérifié ou observé; ils ne prouvent ni le raisonnement interne ni la vérité d'une sortie d'outil.
+The hosted demonstration represents a fictional company and uses synthetic agent identities, invoices, policy notes, and connector results. State is persisted in the configured database and is read back from the API; it is not a hard-coded activity feed. The mock connectors write local demo artifacts only. They do not send messages, contact suppliers, or move money.
 
-## Démonstration ciblée
+## Product guarantees demonstrated
 
-Le scénario MVP utilise deux agents, deux outils, des données classifiées et une délégation :
+- Each protected operation is tied to a mission and signed mandate scoped by tools, resources, budgets, expiry, and delegation rights.
+- A child mandate cannot expand the encoded parent scope, budget, expiry, or delegation/data flags.
+- Cumulative budgets are checked atomically; request identifiers cannot be replayed.
+- Confidential data transfers are checked against declared labels and destinations.
+- A required exact-operation approval must exist and be unused before the protected operation is allowed.
+- The allow/deny decision is durably journaled before connector execution. Journal-write failure blocks the action.
+- Signed receipts describe what the controller checked or observed. They do not prove model reasoning or the truth of a tool response.
 
-1. A reçoit un mandat de mission avec budget, outils, durée et restrictions de données.
-2. A délègue à B un sous-ensemble limité de ces droits; une preuve ZK Groth16 démontre que le sous-mandat respecte son parent sans publier ses champs privés au vérificateur.
-3. Une opération autorisée passe; une sortie confidentielle vers une destination externe est bloquée.
-4. Le contrôleur refuse un dépassement du budget cumulé, une procédure sans justificatif, une requête rejouée et une opération après révocation.
-5. Un vérificateur indépendant détecte une altération du journal chaîné.
-6. Le mode simulation teste des demandes permises et interdites sans appeler de connecteur réel.
+## Demo journey
 
-## Architecture cible
+1. Create a mission mandate with a tool scope, resources, limits, budget, expiry, and delegation setting.
+2. Delegate a narrower child mandate. The prototype generates and independently verifies a Groth16 proof for the encoded parent-child relation.
+3. Run a workflow. The AWS path uses three specialist agents to produce a proposal; the AgentSafe controller independently evaluates it. The local path runs deterministic policy cases without an LLM call.
+4. Inspect an allowed internal action and blocked confidential external transfer, missing approval, budget overrun, replay, or post-revocation action.
+5. Inspect the signed JSONL audit events, verify the journal, and use the kill switch to stop future actions.
 
-| Composant | Choix du prototype | Responsabilité |
+## AI workflow and model routing
+
+Amazon Bedrock AgentCore Runtime hosts three sequential Strands agents: Research Agent, Security Analyst Agent, and Action Planner Agent. Amazon Bedrock runs inference. Amazon Titan creates embeddings and OpenSearch Serverless retrieves synthetic policy guidance. The runtime can propose actions but has no business-tool credentials; FastAPI remains the authorization boundary.
+
+Four Bedrock models are configured as a fallback chain, in provider order: Claude Sonnet 4.5, Claude Haiku 4.5, Claude Sonnet 4.6, then Mistral Devstral 2 123B. AWS Converse smoke checks in the workshop account returned `OK` for each. Role preferences specialize the primary model: Sonnet 4.5 for research, Sonnet 4.6 for security review, and Haiku 4.5 for structured planning. Each role then tries the remaining configured models in order. Empty output and invalid planner JSON trigger fallback. The interface records which model served each role and which earlier attempts failed.
+
+Model access was verified in the AWS workshop session; that does not by itself mean the AgentCore runtime and OpenSearch collection are deployed or reachable from Vercel. The dashboard must continue to label the live AWS workflow unavailable until runtime, index, and Vercel-to-AWS identity are all configured and a real end-to-end call succeeds.
+
+## Components
+
+| Component | Prototype technology | Responsibility |
 | --- | --- | --- |
-| Contrôleur et API | Python, FastAPI, Pydantic | Vérifier puis exécuter les opérations protégées |
-| État local | SQLite | Mandats, budgets, justificatifs, révocations et journal |
-| Signatures | Ed25519, JWS/JWT | Authentifier les mandats, demandes et reçus |
-| Intégrité | SHA-256 | Empreinte et chaînage des événements |
-| Délégation privée | Circom 2, circomlib/Poseidon, Groth16, snarkjs | Prouver la relation parent-enfant lors d'une délégation, pas à chaque appel d'outil |
-| Console | HTML/CSS/JavaScript servi par FastAPI | Inventaire des mandats, groupes, journal SIEM JSONL, alertes et intervention |
+| Controller and API | Python, FastAPI, Pydantic | Validate signed mandates and requests, enforce rules, call only local demo connectors |
+| Durable state | Supabase PostgreSQL via the session pooler when hosted; SQLite for isolated local development | Store mandates, budgets, alerts, approvals, artifacts, and journal events |
+| Authorization signatures | Ed25519 | Sign mandates, agent requests, and controller receipts |
+| Event integrity | SHA-256 chain and Ed25519 signatures | Detect edits to exported event history |
+| Delegation privacy | Circom 2, circomlib/Poseidon, Groth16, snarkjs | Prove the bounded parent-child relation at delegation time |
+| Agent orchestration | AWS Bedrock AgentCore with Strands Agents | Run specialist proposal agents in the AWS-backed path |
+| Policy retrieval | Bedrock Titan embeddings and OpenSearch Serverless | Retrieve synthetic rule guidance for the agents |
+| Dashboard | HTML, CSS, JavaScript served by FastAPI | Separate mission, workflow, access, audit, and response views |
+| Hosted demo | Vercel | Serve the controller and console; isolate Node proof/AWS bridge functions |
 
-Les clés privées restent dans les composants locaux de signature, jamais dans les prompts. Les détails des documents et des prompts ne sont pas copiés dans le journal. Les engagements de données prévisibles doivent inclure un aléa secret.
+Private signing keys stay with the signing components, not in prompts. Raw document and prompt content is not copied into the audit journal. Low-entropy private values are represented using keyed commitments.
 
-## Limites et sécurité
+## Security and product limits
 
-Le journal est chaîné et signé, mais un administrateur qui contrôle le stockage peut supprimer une fin non encore attestée. Des points de contrôle signés conservés séparément réduisent ce risque; le prototype ne qualifie pas le journal d'inviolable. Une signature authentifie un label de donnée mais ne prouve pas que sa classification initiale était correcte. Le setup Groth16 de démonstration n'est pas une cérémonie auditée et n'est pas adapté à la production.
+The journal is signed and hash-chained, but an administrator who controls the database can delete an uncheckpointed tail. A signature authenticates a data label supplied by a caller; it does not prove that the source classified the data correctly. The one-party Groth16 development setup is not an audited trusted setup. Human approvals are demo interactions, not enterprise identity management. Group member names are a roster; the prototype does not mint per-member cryptographic credentials. JSONL export is SIEM-friendly output, not a live Splunk, Sentinel, or Datadog integration. No real company connector is enabled.
 
-## État actuel du dépôt
+The audit screen anchors a salted journal-head commitment to the deployed Fuji `AuditAnchor` contract through MetaMask. The controller confirms it only after checking the transaction receipt and emitted root event. This proves that the commitment was recorded at a chain height; it does not make the private journal contents public or prove that tool execution was truthful.
 
-Le contrôleur local `controller/` est maintenant exécutable avec FastAPI, SQLite, Ed25519, un tableau de bord local et deux agents de démonstration structurés comme nœuds dans un LangGraph `StateGraph`. Le graphe sert de harnais de test déterministe; il ne fait pas d'appel LLM. Les mandats et les requêtes des agents sont signés; les demandes de délégation sont signées par l'agent parent; les périmètres, budgets réservés et cumulés, approbations exactes à usage unique, expiration et révocation sont contrôlés. Une décision est écrite avant l'exécution des deux connecteurs locaux de démonstration. Les reçus sont signés. Le vérificateur indépendant peut contrôler un export du journal SHA-256 chaîné et signé. Les paramètres privés des actions restent hors du journal; les ressources et destinations y sont représentées par des engagements HMAC calculés avec la clé locale du contrôleur.
+## Current deployment boundary
 
-Le scénario vérifié montre une action interne permise, une sortie confidentielle externe bloquée, un achat bloqué sans approbation, un achat local permis après clic explicite, un dépassement du budget délégué bloqué et une action post-révocation bloquée. Les délégations compilent le circuit Circom, produisent une preuve Groth16 et la vérifient dans un processus snarkjs séparé avant d'émettre le mandat enfant. Le contenu des données n'est pas recopié dans le journal; son empreinte fait partie de l'autorisation signée.
-
-La console comporte quatre vues SOC : (1) identité, mandat, périmètre, restrictions, limites, expiration, délégation et kill switch; (2) policies de groupe avec budget partagé; (3) flux d'audit signé et export JSONL; (4) alertes ASI02, ASI03 et crypto avec résolution et révocation manuelle/automatique. Trois refus du même mandat en 60 secondes déclenchent la révocation de son arbre de délégation. Les événements sont écrits dans `controller/.data/audit.log` pour collecte locale.
-
-Les limites restent visibles : aucun outil externe n'est connecté; l'approbateur est une interaction de démonstration non authentifiée; les labels viennent de l'appelant et ne sont pas attestés par un connecteur source; la cérémonie de setup Groth16 est locale à une partie et non auditée; aucun point de contrôle externe ne protège la fin du journal; les clés et rôles d'entreprise ne sont pas provisionnés. Les membres de groupe restent un roster et ne reçoivent pas encore de justificatifs cryptographiques individuels. L'application publiée `https://agentsafe-nu.vercel.app` sert maintenant le contrôleur FastAPI, son tableau de bord et la fonction Node.js séparée qui génère/vérifie les preuves. Elle persiste dans Neon PostgreSQL; les agents et actions de démonstration restent synthétiques. Le contrôleur n'ancre pas encore le journal sur Avalanche Fuji.
+The `controller/` app is the intended hosted product. It includes the FastAPI controller, console, PostgreSQL persistence, separate Groth16 endpoint, and AWS bridge. Deployment state and end-to-end AWS readiness must be verified against the current Vercel production deployment before describing the AWS path as live. Keep documented status tied to a production health check and a successful workflow invocation.

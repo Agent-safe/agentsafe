@@ -1,0 +1,8 @@
+.venv/**
+.data/**
+.pytest_cache/**
+__pycache__/**
+*.py[cod]
+node_modules/**
+zk/node_modules/**
+aws-agentcore/**

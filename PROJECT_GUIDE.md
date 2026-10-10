@@ -1,85 +1,92 @@
-# AgentSafe: what the project is and how to see it work
+# AgentSafe: Project Guide
 
-## The idea in plain language
+## What the product does
 
-An AI agent can have legitimate access to tools and still use them in a risky way: send confidential information to an outside address, spend more than its mission budget, or keep acting after its task was canceled. AgentSafe puts a controller between an agent and selected tools. The agent proposes an action; AgentSafe checks the authority and rules; the connector runs only after an allow decision has been written to the local journal.
+An AI agent can have legitimate access and still use it dangerously: send confidential information to the wrong destination, exceed a mission budget, delegate excessive authority, replay a request, or act after cancellation. AgentSafe places a controller between agents and selected tools. The agent proposes; the controller evaluates the signed mandate and policy; only an allowed, durably recorded action can reach a protected connector.
 
-Think of the controller as a security checkpoint with a signed work order. The live hackathon console now runs this controller on Vercel with durable Neon PostgreSQL, Ed25519 signatures, and a hash-chained audit journal. The Avalanche Fuji contract is a separate evidence-anchoring component; the API currently does not submit journal roots on-chain, so do not claim that live controller decisions are anchored yet.
+The hosted demo represents Acme Commerce, a fictional company. Agents, invoices, rules, and connector effects are synthetic and persisted through the application. No real company tool is connected.
 
-Open the live console at <https://agentsafe-nu.vercel.app>. The deployed Python controller calls a separate Node.js Vercel function for Groth16 proof operations; this split avoids bundling a Node runtime into the Python function. The production URL is publicly reachable, and its agents/data remain synthetic.
+## See the system work
 
-## How the local demo works
+Use the live console at <https://agentsafe-nu.vercel.app>. The overview explains the product, then the workflow page separates AWS model calls from deterministic local policy checks. Agent permissions, groups and missions, audit evidence, and alerts are separate pages so an operator can find the relevant function quickly.
 
-The running prototype is under `controller/`, not the old Next.js demo. Agent A and Agent B are nodes in a compiled LangGraph `StateGraph`; a third node passes each proposed action through AgentSafe. This particular test graph uses a deterministic fixture, not Mistral, so its allowed and blocked outcomes are repeatable. Start it with:
+The AWS workflow only runs when AgentCore, OpenSearch, Bedrock access, and the Vercel OIDC bridge are configured. A model availability smoke test alone does not establish that the runtime path is live. A successful workflow request and its persisted controller decision are the proof. Local policy checks are deterministic, do not call an LLM, and label their artifacts as synthetic.
+
+## Request path
+
+```mermaid
+flowchart LR
+  A[Agent proposal] --> B[Verify Ed25519 identity and mandate]
+  B --> C[Check scope, budget, expiry, revocation, approval, data route]
+  C --> D{Policy decision}
+  D -- Deny --> E[Persist denial and alert]
+  D -- Allow --> F[Persist decision before execution]
+  F --> G[Local demo connector]
+  G --> H[Persist result and sign receipt]
+  E --> I[Operator audit and response]
+  H --> I
+  I -->|kill switch| J[Revoke mission and child grants]
+```
+
+1. Create a mission with a root public key and bounded authority.
+2. The parent agent signs a delegation claim. AgentSafe verifies the parent signature and checks the child does not widen scope, budget, duration, or delegation rights.
+3. A Groth16 proof demonstrates the encoded parent-child relation, then a separate verifier checks it before the child grant is issued.
+4. Each action request includes a unique request ID and an Ed25519 signature. The controller verifies the request, durably stores its decision, and invokes a connector only after an allow.
+5. The response is stored separately. If the result is ambiguous, the journal records an unknown result instead of silently refunding budget.
+
+## Product map
+
+```mermaid
+flowchart TB
+  subgraph Admin[Company security console]
+    M[Mission and group policies]
+    I[Agent mandate inventory]
+    W[Workflow runner]
+    A[Audit and alerts]
+  end
+  M -->|signed mandate| C[FastAPI AgentSafe controller]
+  W -->|proposal| C
+  C -->|policy decision| D[Local demo connectors]
+  C --> S[(Supabase PostgreSQL hosted / SQLite local)]
+  C --> Z[Separate Node.js Groth16 function]
+  C --> J[Signed hash-chained events]
+  J --> A
+  A -->|JSONL export| SIEM[Log shipper → SIEM/SOAR]
+  W -->|AWS-backed proposal path| R[Bedrock AgentCore + Strands]
+  R --> BR[Amazon Bedrock model chain]
+  R --> OS[OpenSearch Serverless policy retrieval]
+```
+
+## AWS model chain
+
+The AWS-backed workflow uses four Bedrock models in this order: Claude Sonnet 4.5, Claude Haiku 4.5, Claude Sonnet 4.6, and Mistral Devstral 2 123B. The Research Agent prefers Sonnet 4.5, the Security Analyst prefers Sonnet 4.6, and the Action Planner prefers Haiku 4.5 for constrained JSON. Each role tries its own preferred model first, then the other models in configured order. Anthropic stays ahead of Mistral. Empty output and invalid planner JSON trigger fallback. If the chain is exhausted, the request fails closed. The UI records each step's selected model and failure attempts.
+
+## Local development
+
+From the repository root:
 
 ```bash
 cd controller
 uv sync
-uv run uvicorn app:app --host 127.0.0.1 --port 8765
-```
-
-Then open <http://127.0.0.1:8765> and click **Start policy demo**. The controller creates a mission for Agent A, signs its mandate, and accepts a delegation signed by A that gives Agent B a smaller budget and tool scope. The same actions now persist in Neon PostgreSQL when deployed on Vercel; local development still uses SQLite. Agent B signs each proposed action.
-
-Before starting the controller for the first time, initialize its real delegation proof circuit from the repository root:
-
-```bash
-cd zk
 npm ci
-npm run setup
-cd ../controller
-uv sync
+npm run build
 uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-The setup step creates local Groth16 keys for the compiled Circom circuit. A delegation is issued only after the proof is generated and independently checked by a separate snarkjs verifier process. The one-party development setup is not a production ceremony.
-
-The first policy run shows:
-
-1. A confidential record sent to an internal destination is allowed and saved as a local artifact.
-2. The same confidential record sent to an outside destination is blocked.
-3. A $70 mock purchase is blocked while its exact-operation approval is missing.
-
-The run then pauses in the interface. Click **Approve exact $70 local demo order** to record a clear local demo approval. The controller checks the approval against the proposed parameters, consumes it once, and writes a local artifact. Agent B then tries another $20. The mission still has $30, but B’s delegated grant has only $10 left, so the request is blocked by the child grant’s remaining budget. Finally, the mission is revoked and a later action is blocked.
-
-Every step creates signed controller events. The page shows the current mission and parent/child grant tree, not an invented prefilled activity feed. The API documentation is at <http://127.0.0.1:8765/docs>.
-
-## What actually happens at an action
-
-The controller verifies the caller’s Ed25519 signature against the public key in its grant; checks mission and grant status, expiry, agent identity, tool/resource scope, cumulative mission and grant budgets, destination/data label, and any exact-operation approval; then commits the decision inside a SQLite write transaction. A request ID can be used once. Only after that durable commit does a permitted connector run. A separate event records the result, and the controller returns a signed receipt.
-
-If the journal write fails, the tool does not run. If execution outcome cannot be confirmed, the journal records `unknown`; the system does not quietly refund the budget. Revocation blocks future operations for all grants in the mission but does not undo earlier operations.
-
-The current connectors are intentionally side-effect free: `records.share_local` and `procurement.create_order` write synthetic demo artifacts into the configured database (Neon in the hosted deployment, SQLite locally). They do not send email, contact a supplier, or make a purchase. The approval button is an explicit local demo interaction, not an authenticated enterprise approver system.
+The Groth16 artifacts are a one-party development setup. Their presence proves that the code can generate and verify the demo proof, not that the parameters are production-audited.
 
 ## What the evidence means
 
-Each event contains identifiers, policy outcome, keyed HMAC commitments for private resource and destination values, and a link to the preceding event; it does not copy the request payload or raw destination into the journal. Events are SHA-256 chained and Ed25519 signed. `GET /journal/export` downloads the records and public key. `controller/verify_export.py` validates the export independently of the running controller:
+Journal events contain identifiers, policy decisions, keyed commitments for private resource and destination values, and links to preceding events. They do not contain raw request payloads. SHA-256 links and Ed25519 signatures make edits detectable in an exported journal. A database administrator can still delete an uncheckpointed tail. A valid signature shows that the controller signed the event; it does not establish that a model answer or external system result is true.
 
-```bash
-curl http://127.0.0.1:8765/journal/export > /tmp/agentsafe-journal.json
-uv run python verify_export.py /tmp/agentsafe-journal.json
-```
+## Boundaries
 
-A valid signature means the event matches this controller’s signing key. It does not establish that an AI answer or external tool result is true. A database administrator could delete an uncheckpointed tail; the project does not claim this journal is inviolable.
+- Demo connectors write synthetic artifacts only; they do not send mail or place real orders.
+- The approval interaction is a demo issuer, not authenticated enterprise identity management.
+- Group names and rosters do not issue member-specific credentials.
+- Labels are declared by signed callers; trusted source labeling and propagation are not implemented.
+- JSONL is ready for a log shipper but no live Splunk, Sentinel, or Datadog integration is configured.
+- The journal checkpoint can be anchored on Avalanche Fuji; a checkpoint is marked confirmed only after the Fuji transaction receipt and contract event are checked.
+- The current ZK setup is not a production trusted ceremony.
 
-## Current boundaries
-
-- The hosted controller and console are served by Vercel and persist to Neon PostgreSQL; local development uses SQLite. The API and console tests pass together.
-- The two demo agents and handoff are represented in LangGraph. The scenario is deliberately deterministic; it does not call an LLM.
-- There is no real customer data, Gmail integration, external purchase tool, or business connector in the demo.
-- Four SOC tabs show persisted grant inventory, group-principal policies and shared mission budgets, audit events/JSONL export, and active alerts with manual/automatic kill switches. Denials are classified as ASI02 tool misuse, ASI03 privilege/budget abuse, or crypto signature/replay alerts. Three denied calls by one grant within 60 seconds revoke that grant and descendants.
-- A group policy has a signed group principal and shared budget, but listed member names are only a roster. Per-member cryptographic credentials and membership enforcement are not implemented.
-- Data labels are supplied on signed requests. The prototype does not yet have trusted source connectors that assign labels or preserve them through real agent transformations.
-- Delegation now generates a Circom/Poseidon/Groth16 zero-knowledge proof that the child mandate preserves the parent mission and does not expand its bounded scope, budget, expiry, or delegation/data flags. The API stores the proof and public signals and provides a separate verification endpoint. This proves only the encoded relation; it does not make the whole controller private or production-audited.
-- Human approvals are local demo records. Enterprise identity, approver roles, MFA, and authenticated approval policy remain to be built.
-- There is no independently held signed checkpoint for journal-tail deletion detection, no enterprise key manager, and no multi-tenant service.
-- The live Vercel controller now uses Neon for durable state. Its demo agents and connector data are synthetic; no production business tools are connected. The current controller does not write audit roots to Avalanche Fuji. Groth16 keys use a one-party development setup and are not production ceremony parameters.
-
-## Where to look in the code
-
-- `controller/app.py` — API, mandate and agent-signature validation, delegation, policy checks, local connectors, receipts and event journal.
-- `controller/ui/index.html` — interactive local console.
-- `controller/verify_export.py` — independent signed-journal verifier.
-- `controller/tests/test_controller.py` — end-to-end API checks, replay/tamper checks and cross-origin guard.
-- `PRODUCT_SPEC.md` — product requirements and status.
-- `app/api/simulate/agent.ts` — earlier LangGraph demo retained in the repository; the published app now serves the `controller/` enforcement prototype.
+See [`HOW_AGENTSAFE_WORKS.md`](HOW_AGENTSAFE_WORKS.md) for the plain-language walkthrough and Mermaid sequence. See [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) for requirements and limits.

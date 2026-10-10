@@ -1,0 +1,8 @@
+[
+  {
+    "name": "future-unicorn-eu-north-1",
+    "description": "AgentSafe hackathon runtime in the user's regular AWS account, separate from Workshop Studio",
+    "account": "927388046750",
+    "region": "eu-north-1"
+  }
+]

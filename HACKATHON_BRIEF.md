@@ -20,11 +20,11 @@ The threat story is concrete: a legitimately provisioned agent can still send co
 - Keep scenarios deterministic and label synthetic inputs/results as synthetic. A simulated call must never be described as a real external tool action.
 - Demonstrate both legitimate and malicious/unsafe paths: allowed internal work; denied external confidential transfer; exceeded scope or budget; missing exact approval; replay or invalid signature; and revocation/kill switch.
 - Verify Groth16 delegation proofs independently. State that the current one-party setup is development-only; do not imply production trusted-setup security.
-- Persist hosted state in Neon PostgreSQL. The browser dashboard should read actual API state, not hard-coded demo counters or fictional tool-call history.
+- Persist hosted state in Supabase PostgreSQL. The browser dashboard should read actual API state, not hard-coded demo counters or fictional tool-call history.
 - Keep private payloads and credentials out of the audit journal. Export JSONL that can be ingested by standard log shippers, and show reasons for denials and alerts.
-- Never claim a blockchain transaction occurred unless a transaction hash is returned and independently visible on the target explorer. The current Vercel controller does not yet anchor journal roots to Avalanche Fuji.
+- The controller anchors salted journal commitments to the deployed Avalanche Fuji contract. Report an anchor as confirmed only after the API validates the Fuji receipt and commitment event; verify the transaction on the explorer.
 - Avoid adding a workshop technology merely because it appeared in a warm-up. Use the chain and wallet workflow only when it serves the product and is actually integrated.
 
 ## Honest implementation boundary
 
-The current hosted build is an interactive controller prototype with durable PostgreSQL state, Ed25519 mandates/receipts, policy enforcement, LangGraph synthetic scenarios, local-only connectors, a hash-chained signed journal, alerting, and development Groth16 delegation proofs. It is not a production multi-tenant gateway, does not protect third-party tools, does not have authenticated enterprise approvers, and does not yet anchor journal roots on-chain.
+The current hosted build is an interactive controller prototype with durable PostgreSQL state, Ed25519 mandates/receipts, policy enforcement, LangGraph synthetic scenarios, local-only connectors, a hash-chained signed journal, alerting, and Groth16 delegation proofs. It is not a production multi-tenant gateway, does not protect third-party tools, and does not have authenticated enterprise approvers.
