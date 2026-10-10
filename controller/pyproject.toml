@@ -8,6 +8,7 @@ dependencies = [
   "uvicorn>=0.34,<1",
   "cryptography>=44,<47",
   "langgraph>=0.3,<2",
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [tool.uv]

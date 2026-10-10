@@ -29,14 +29,22 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # Local SQLite mode does not require the Postgres driver.
+    psycopg = None
+    dict_row = None
+
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("AGENTSAFE_DATA_DIR", ROOT / ".data"))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+DATA_DIR = Path(os.environ.get("AGENTSAFE_DATA_DIR", Path("/tmp/agentsafe") if DATABASE_URL else ROOT / ".data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("AGENTSAFE_DB", DATA_DIR / "agentsafe.sqlite3"))
 KEY_PATH = Path(os.environ.get("AGENTSAFE_SIGNING_KEY", DATA_DIR / "ed25519.key"))
 AUDIT_LOG_PATH = Path(os.environ.get("AGENTSAFE_AUDIT_LOG", DATA_DIR / "audit.log"))
-ZK_DIR = ROOT.parent / "zk"
+ZK_DIR = Path(os.environ.get("AGENTSAFE_ZK_DIR", ROOT.parent / "zk" if (ROOT.parent / "zk").exists() else ROOT / "zk"))
 @asynccontextmanager
 async def lifespan(_app):
     init_db()
@@ -53,11 +61,16 @@ async def local_browser_guard(request: Request, call_next):
     # This prototype is a local controller. Prevent remote websites and DNS-rebinding
     # pages from driving its state-changing endpoints through the user's browser.
     host = request.headers.get("host", "").split(":", 1)[0].strip("[]").lower()
-    if host not in {"127.0.0.1", "localhost", "::1"}:
+    allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+    allowed_hosts.update(value.strip().lower() for value in os.environ.get("AGENTSAFE_ALLOWED_HOSTS", "").split(",") if value.strip())
+    if os.environ.get("VERCEL_URL"):
+        allowed_hosts.add(os.environ["VERCEL_URL"].split(":", 1)[0].lower())
+    if host not in allowed_hosts:
         return JSONResponse({"detail": "bind this prototype to loopback only"}, status_code=421)
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
-        if origin and origin.rstrip("/").lower() != f"{request.url.scheme}://{request.headers.get('host', '').lower()}".rstrip("/"):
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip()
+        if origin and origin.rstrip("/").lower() != f"{scheme}://{request.headers.get('host', '').lower()}".rstrip("/"):
             return JSONResponse({"detail": "cross-origin state changes are not allowed"}, status_code=403)
     return await call_next(request)
 
@@ -67,7 +80,28 @@ def console():
     return FileResponse(ROOT / "ui" / "index.html")
 
 
-def connect() -> sqlite3.Connection:
+class PostgresAdapter:
+    """Small compatibility layer for the controller's parameterized SQL."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, query, params=()):
+        return self.connection.execute(query.replace("?", "%s"), params)
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def close(self):
+        self.connection.close()
+
+
+def connect():
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError("Install the psycopg[binary] dependency for DATABASE_URL mode")
+        return PostgresAdapter(psycopg.connect(DATABASE_URL, row_factory=dict_row))
     db = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
@@ -78,6 +112,16 @@ def connect() -> sqlite3.Connection:
 @contextmanager
 def transaction(immediate: bool = False):
     db = connect()
+    if DATABASE_URL:
+        try:
+            with db.connection.transaction():
+                # Serialize state-changing requests so journal heads and shared
+                # mission budgets remain atomic across serverless instances.
+                db.execute("SELECT pg_advisory_xact_lock(73104620261010)")
+                yield db
+        finally:
+            db.close()
+        return
     db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     try:
         yield db
@@ -150,6 +194,11 @@ def zk_mandate(mission_id: str, agent_public_key: str, actions: list[str], resou
 
 
 def signer() -> Ed25519PrivateKey:
+    key_b64 = os.environ.get("AGENTSAFE_SIGNING_KEY_B64")
+    if key_b64:
+        return serialization.load_pem_private_key(base64.b64decode(key_b64), password=None)
+    if DATABASE_URL and not KEY_PATH.exists():
+        raise RuntimeError("AGENTSAFE_SIGNING_KEY_B64 is required for persistent online database mode")
     if KEY_PATH.exists():
         return serialization.load_pem_private_key(KEY_PATH.read_bytes(), password=None)
     key = Ed25519PrivateKey.generate()
@@ -191,15 +240,29 @@ def public_key() -> str:
 
 def init_db() -> None:
     with transaction() as db:
-        db.executescript("""
+        event_sequence = "BIGSERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        db.executescript(f"""
         CREATE TABLE IF NOT EXISTS missions(id TEXT PRIMARY KEY, name TEXT NOT NULL, budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), agent_id TEXT NOT NULL, agent_public_key TEXT NOT NULL, parent_id TEXT REFERENCES grants(id), actions TEXT NOT NULL, resources TEXT NOT NULL, parameter_constraints TEXT NOT NULL DEFAULT '{}', budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, budget_reserved REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, can_delegate INTEGER NOT NULL, allow_external INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, mandate TEXT NOT NULL, signature TEXT NOT NULL, zk_nonce TEXT, zk_commitment TEXT, zk_proof TEXT, zk_public_signals TEXT, zk_proof_sha256 TEXT, zk_verified INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL, signature TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), agent_id TEXT NOT NULL, agent_public_key TEXT NOT NULL, parent_id TEXT REFERENCES grants(id), actions TEXT NOT NULL, resources TEXT NOT NULL, parameter_constraints TEXT NOT NULL DEFAULT '{{}}', budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, budget_reserved REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, can_delegate INTEGER NOT NULL, allow_external INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, mandate TEXT NOT NULL, signature TEXT NOT NULL, zk_nonce TEXT, zk_commitment TEXT, zk_proof TEXT, zk_public_signals TEXT, zk_proof_sha256 TEXT, zk_verified INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS events(seq {event_sequence}, event_id TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL, signature TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_id TEXT NOT NULL, tool TEXT NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY, code TEXT NOT NULL, severity TEXT NOT NULL, mission_id TEXT, grant_id TEXT, request_id TEXT, reason TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
         CREATE TABLE IF NOT EXISTS agent_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL, department TEXT NOT NULL, budget_limit REAL NOT NULL, mission_id TEXT NOT NULL, grant_id TEXT NOT NULL, member_names TEXT NOT NULL, created_at INTEGER NOT NULL);
         """)
+        if DATABASE_URL:
+            # Idempotent upgrades for online instances whose schema predates the controller.
+            for column, definition in {
+                "budget_reserved": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+                "agent_public_key": "TEXT NOT NULL DEFAULT ''",
+                "parameter_constraints": "TEXT NOT NULL DEFAULT '{}'",
+                "zk_nonce": "TEXT", "zk_commitment": "TEXT", "zk_proof": "TEXT",
+                "zk_public_signals": "TEXT", "zk_proof_sha256": "TEXT",
+                "zk_verified": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                db.execute(f"ALTER TABLE grants ADD COLUMN IF NOT EXISTS {column} {definition}")
+            db.execute("ALTER TABLE alerts ALTER COLUMN created_at TYPE BIGINT")
+            return
         # Upgrade databases created by earlier prototype iterations.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(grants)")}
         if "budget_reserved" not in columns:
@@ -230,11 +293,12 @@ def append_event(db: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]
     signature = sign({"hash": digest, "event_id": event_id})
     db.execute("INSERT INTO events(event_id,created_at,body,prev_hash,hash,signature) VALUES(?,?,?,?,?,?)", (event_id, created_at, canonical(content).decode(), prev_hash, digest, signature))
     record = {**content, "prev_hash": prev_hash, "hash": digest, "signature": signature}
-    AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with AUDIT_LOG_PATH.open("ab") as log:
-        log.write(canonical(record) + b"\n")
-        log.flush()
-        os.fsync(log.fileno())
+    if not DATABASE_URL:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG_PATH.open("ab") as log:
+            log.write(canonical(record) + b"\n")
+            log.flush()
+            os.fsync(log.fileno())
     return record
 
 
@@ -323,7 +387,7 @@ def health():
         zk_ready = zk_call("self-check", {}).get("setupReady") is True
     except RuntimeError:
         zk_ready = False
-    return {"ok": True, "mode": "local", "database": "sqlite", "signing": "ed25519", "delegation_proofs": "Groth16 ready" if zk_ready else "setup required", "audit_log": "JSONL", "connectors": ["procurement.create_order", "records.share_local"], "external_connectors": False}
+    return {"ok": True, "mode": "serverless" if os.environ.get("VERCEL") else "local", "database": "postgresql" if DATABASE_URL else "sqlite", "signing": "ed25519", "delegation_proofs": "Groth16 ready" if zk_ready else "setup required", "audit_log": "JSONL", "connectors": ["procurement.create_order", "records.share_local"], "external_connectors": False}
 
 
 @app.get("/zk/status")
@@ -493,7 +557,9 @@ def signed_action(private: Ed25519PrivateKey, **fields: Any) -> ActionRequest:
 
 
 def add_alert(db: sqlite3.Connection, code: str, severity: str, mission_id: str | None, grant_id: str | None, request_id: str | None, reason: str) -> dict[str, Any]:
-    alert_id, created_at = str(uuid.uuid4()), int(time.time())
+    # Millisecond timestamps preserve alert ordering when several denials arrive
+    # during one second, including across serverless instances.
+    alert_id, created_at = str(uuid.uuid4()), int(time.time() * 1000)
     db.execute("INSERT INTO alerts(id,code,severity,mission_id,grant_id,request_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?)", (alert_id, code, severity, mission_id, grant_id, request_id, reason, created_at))
     append_event(db, {"type": "alert.raised", "alert_id": alert_id, "code": code, "severity": severity, "mission_id": mission_id, "grant_id": grant_id, "request_id": request_id, "reason": reason})
     return {"id": alert_id, "code": code, "severity": severity, "mission_id": mission_id, "grant_id": grant_id, "request_id": request_id, "reason": reason, "created_at": created_at, "resolved_at": None}
@@ -517,7 +583,10 @@ def alert_code(reason: str) -> tuple[str, str]:
 def record_action_denial(db: sqlite3.Connection, req: "ActionRequest", reason: str, now: int) -> None:
     code, severity = alert_code(reason)
     add_alert(db, code, severity, req.mission_id, req.grant_id, req.request_id, reason)
-    recent = db.execute("SELECT COUNT(*) AS n FROM events WHERE created_at>=? AND json_extract(body,'$.grant_id')=? AND json_extract(body,'$.decision')='block' AND json_extract(body,'$.type')='action.decision'", (now - 60, req.grant_id)).fetchone()["n"]
+    grant_expr = "body::jsonb ->> 'grant_id'" if DATABASE_URL else "json_extract(body,'$.grant_id')"
+    decision_expr = "body::jsonb ->> 'decision'" if DATABASE_URL else "json_extract(body,'$.decision')"
+    type_expr = "body::jsonb ->> 'type'" if DATABASE_URL else "json_extract(body,'$.type')"
+    recent = db.execute(f"SELECT COUNT(*) AS n FROM events WHERE created_at>=? AND {grant_expr}=? AND {decision_expr}='block' AND {type_expr}='action.decision'", (now - 60, req.grant_id)).fetchone()["n"]
     if recent == 3:
         db.execute("WITH RECURSIVE grant_tree(id) AS (SELECT id FROM grants WHERE id=? UNION ALL SELECT g.id FROM grants g JOIN grant_tree p ON g.parent_id=p.id) UPDATE grants SET revoked=1 WHERE id IN (SELECT id FROM grant_tree)", (req.grant_id,))
         append_event(db, {"type": "grant.auto_revoked", "grant_id": req.grant_id, "mission_id": req.mission_id, "trigger": "3 denied actions in 60 seconds", "affected_descendants": True})
@@ -537,7 +606,8 @@ def protected_action(req: ActionRequest):
     decision = "allow"
     reason = "mandate and policies permit this local connector"
     with transaction(immediate=True) as db:
-        if db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.request_id')=?", (req.request_id,)).fetchone():
+        request_expr = "body::jsonb ->> 'request_id'" if DATABASE_URL else "json_extract(body,'$.request_id')"
+        if db.execute(f"SELECT 1 FROM events WHERE {request_expr}=?", (req.request_id,)).fetchone():
             append_event(db, {"type": "action.decision", "request_id": req.request_id, "mission_id": req.mission_id, "grant_id": req.grant_id, "agent_id": req.agent_id, "tool": req.tool, "decision": "block", "reason": "request_id already used", "attempt": "replay"})
             record_action_denial(db, req, "request_id already used", now)
             raise HTTPException(409, "request_id already used")
@@ -631,7 +701,7 @@ def list_missions():
     init_db()
     with transaction() as db:
         missions = [dict(row) for row in db.execute("SELECT id,name,budget_limit,budget_used,expires_at,revoked,created_at FROM missions ORDER BY created_at DESC")]
-        grants = [dict(row) for row in db.execute("SELECT id,mission_id,agent_id,parent_id,actions,resources,parameter_constraints,budget_limit,budget_used,budget_reserved,expires_at,can_delegate,allow_external,revoked,zk_commitment,zk_proof_sha256,zk_verified FROM grants ORDER BY rowid")]
+        grants = [dict(row) for row in db.execute("SELECT id,mission_id,agent_id,parent_id,actions,resources,parameter_constraints,budget_limit,budget_used,budget_reserved,expires_at,can_delegate,allow_external,revoked,zk_commitment,zk_proof_sha256,zk_verified FROM grants ORDER BY id")]
         artifacts = [dict(row) for row in db.execute("SELECT id,mission_id,request_id,tool,summary,created_at FROM artifacts ORDER BY created_at DESC")]
     for grant in grants:
         grant["actions"] = json.loads(grant["actions"])
@@ -664,7 +734,12 @@ def resolve_alert(alert_id: str):
 @app.get("/journal/jsonl")
 def export_jsonl():
     init_db()
-    body = AUDIT_LOG_PATH.read_text("utf-8") if AUDIT_LOG_PATH.exists() else ""
+    if DATABASE_URL:
+        with transaction() as db:
+            rows = db.execute("SELECT body,prev_hash,hash,signature FROM events ORDER BY seq").fetchall()
+        body = "".join(canonical({**json.loads(row["body"]), "prev_hash": row["prev_hash"], "hash": row["hash"], "signature": row["signature"]}).decode() + "\n" for row in rows)
+    else:
+        body = AUDIT_LOG_PATH.read_text("utf-8") if AUDIT_LOG_PATH.exists() else ""
     return Response(content=body, media_type="application/x-ndjson", headers={"Content-Disposition": "attachment; filename=agentsafe-audit.jsonl"})
 
 

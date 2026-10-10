@@ -4,7 +4,7 @@
 
 An AI agent can have legitimate access to tools and still use them in a risky way: send confidential information to an outside address, spend more than its mission budget, or keep acting after its task was canceled. AgentSafe puts a controller between an agent and selected tools. The agent proposes an action; AgentSafe checks the authority and rules; the connector runs only after an allow decision has been written to the local journal.
 
-Think of the controller as a security checkpoint with a signed work order. A blockchain is not what makes the checkpoint safe. This iteration uses local SQLite and Ed25519 signatures. Avalanche Fuji was used in an earlier demo to timestamp a hash; that chain action is separate from the new controller and does not enforce its rules.
+Think of the controller as a security checkpoint with a signed work order. The live hackathon console now runs this controller on Vercel with durable Neon PostgreSQL, Ed25519 signatures, and a hash-chained audit journal. The Avalanche Fuji contract is a separate evidence-anchoring component; the API currently does not submit journal roots on-chain, so do not claim that live controller decisions are anchored yet.
 
 ## How the local demo works
 
@@ -16,7 +16,7 @@ uv sync
 uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-Then open <http://127.0.0.1:8765> and click **Start policy demo**. The controller creates a mission for Agent A, signs its mandate, and accepts a delegation signed by A that gives Agent B a smaller budget and tool scope. Agent B signs each proposed action.
+Then open <http://127.0.0.1:8765> and click **Start policy demo**. The controller creates a mission for Agent A, signs its mandate, and accepts a delegation signed by A that gives Agent B a smaller budget and tool scope. The same actions now persist in Neon PostgreSQL when deployed on Vercel; local development still uses SQLite. Agent B signs each proposed action.
 
 Before starting the controller for the first time, initialize its real delegation proof circuit from the repository root:
 
@@ -47,7 +47,7 @@ The controller verifies the caller’s Ed25519 signature against the public key 
 
 If the journal write fails, the tool does not run. If execution outcome cannot be confirmed, the journal records `unknown`; the system does not quietly refund the budget. Revocation blocks future operations for all grants in the mission but does not undo earlier operations.
 
-The current connectors are intentionally local: `records.share_local` and `procurement.create_order` write demo artifacts into SQLite. They do not send email, contact a supplier, or make a purchase. The approval button is an explicit local demo interaction, not an authenticated enterprise approver system.
+The current connectors are intentionally side-effect free: `records.share_local` and `procurement.create_order` write synthetic demo artifacts into the configured database (Neon in the hosted deployment, SQLite locally). They do not send email, contact a supplier, or make a purchase. The approval button is an explicit local demo interaction, not an authenticated enterprise approver system.
 
 ## What the evidence means
 
@@ -62,7 +62,7 @@ A valid signature means the event matches this controller’s signing key. It do
 
 ## Current boundaries
 
-- The local API and console are running, tested together, and backed by SQLite on this machine.
+- The hosted controller and console are served by Vercel and persist to Neon PostgreSQL; local development uses SQLite. The API and console tests pass together.
 - The two demo agents and handoff are represented in LangGraph. The scenario is deliberately deterministic; it does not call an LLM.
 - There is no real customer data, Gmail integration, external purchase tool, or business connector in the demo.
 - Four SOC tabs show persisted grant inventory, group-principal policies and shared mission budgets, audit events/JSONL export, and active alerts with manual/automatic kill switches. Denials are classified as ASI02 tool misuse, ASI03 privilege/budget abuse, or crypto signature/replay alerts. Three denied calls by one grant within 60 seconds revoke that grant and descendants.
@@ -71,7 +71,7 @@ A valid signature means the event matches this controller’s signing key. It do
 - Delegation now generates a Circom/Poseidon/Groth16 zero-knowledge proof that the child mandate preserves the parent mission and does not expand its bounded scope, budget, expiry, or delegation/data flags. The API stores the proof and public signals and provides a separate verification endpoint. This proves only the encoded relation; it does not make the whole controller private or production-audited.
 - Human approvals are local demo records. Enterprise identity, approver roles, MFA, and authenticated approval policy remain to be built.
 - There is no independently held signed checkpoint for journal-tail deletion detection, no enterprise key manager, and no multi-tenant service.
-- The deployed `agentsafe-nu.vercel.app` site is the earlier synthetic LangGraph dashboard. It is not connected to this SQLite controller. Do not use it as proof an operating agent is protected. The controller stays local because Vercel’s serverless disk is not the durable client-local database the design needs.
+- The live Vercel controller now uses Neon for durable state. Its demo agents and connector data are synthetic; no production business tools are connected. The current controller does not write audit roots to Avalanche Fuji. Groth16 keys use a one-party development setup and are not production ceremony parameters.
 
 ## Where to look in the code
 

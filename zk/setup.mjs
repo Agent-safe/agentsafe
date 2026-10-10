@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const build = path.join(here, "build");
-const bin = path.join(here, "node_modules", ".bin");
+const localBin = path.join(here, "node_modules", ".bin");
+const rootBin = path.resolve(here, "..", "node_modules", ".bin");
+const bin = fs.existsSync(localBin) ? localBin : rootBin;
 const circom = path.join(bin, "circom2");
 const snark = path.join(bin, "snarkjs");
 fs.mkdirSync(build, { recursive: true });

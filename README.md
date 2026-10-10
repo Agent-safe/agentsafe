@@ -55,6 +55,8 @@ The prototype connectors are `records.share_local` and `procurement.create_order
 
 ## Architecture and deployment status
 
-The local controller is the enforcement point. The agent must not hold direct credentials for protected tools; if a tool call bypasses the controller, AgentSafe cannot protect it. SQLite and the signing key are designed to stay with this local process. The production Vercel site is still the earlier synthetic LangGraph dashboard; it does not host this controller, and its serverless filesystem is not the durable local SQLite deployment described here. Don’t treat the Vercel dashboard as evidence that an agent is protected.
+The controller is the enforcement point. The agent must not hold direct credentials for protected tools; if a tool call bypasses the controller, AgentSafe cannot protect it. The hosted Vercel application runs the FastAPI controller and stores missions, grants, alerts, artifacts, and journal events in Neon PostgreSQL. Local development defaults to SQLite. The Ed25519 signing key is a sensitive Vercel environment variable in hosted mode.
+
+The hosted demo still uses synthetic agents and side-effect-free connectors. It does not connect to real email, procurement, or business systems. The controller currently does not submit journal commitments to Avalanche Fuji; the contract is not an active part of the hosted action flow. Delegation ZK proofs are generated and independently verified using a one-party development setup, not production ceremony parameters. Do not present the deployment as production-ready enforcement for a company’s agents.
 
 See [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) for a plain-language walkthrough and [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) for the MVP requirements and implementation status.

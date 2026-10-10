@@ -1,0 +1,8 @@
+node_modules/
+build/
+*.ptau
+*.zkey
+verification_key.json
+input.json
+proof.json
+public.json
