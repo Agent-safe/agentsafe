@@ -23,6 +23,10 @@ Group policies create a signed group-principal mandate and shared mission budget
 
 The local controller is deliberately bound to loopback. State lives in `controller/.data/` by default; set `AGENTSAFE_DATA_DIR` to choose another local directory. The Ed25519 controller key is generated on first run and kept in that directory. Never commit or share it. Browser-driven state changes reject cross-origin requests.
 
+## Hosted hackathon demo
+
+The deployed controller and console are available at <https://agentsafe-nu.vercel.app>. Its FastAPI controller runs as a Python function and stores state in Neon PostgreSQL. Groth16 proof generation and verification run in a separate Node.js function at `/api/zk`, so the Python function does not bundle a second Node runtime. The hosted page is publicly reachable; its agents and connector effects remain synthetic demo data.
+
 ## Run the checks
 
 ```bash
@@ -47,15 +51,15 @@ The prototype connectors are `records.share_local` and `procurement.create_order
 
 ## What is implemented and what is not
 
-- **Working now:** local FastAPI controller, Pydantic validation, SQLite transactions, Ed25519-signed mandates and agent requests, parent-signed scoped delegation, parent budget reservation, cumulative spend checks, expiry/revocation, one-use exact-parameter approval, fail-closed pre-execution journal write, two local-only connectors, signed receipts, hash-chained events, export verifier, and an interactive local console. The demo’s two deterministic agents and handoff run through a compiled LangGraph `StateGraph`; this is a repeatable policy test harness, not an LLM-generated run.
+- **Working now:** local FastAPI controller, Pydantic validation, SQLite transactions, Ed25519-signed mandates and agent requests, parent-signed scoped delegation, parent budget reservation, cumulative spend checks, expiry/revocation, one-use exact-parameter approval, fail-closed pre-execution journal write, two local-only connectors, signed receipts, hash-chained events, export verifier, and an interactive local console. The same controller is deployed at `https://agentsafe-nu.vercel.app` with Neon PostgreSQL persistence; its Groth16 endpoint runs as a separate Node.js function to keep the Python function bundle within Vercel's limit. The demo’s two deterministic agents and handoff run through a compiled LangGraph `StateGraph`; this is a repeatable policy test harness, not an LLM-generated run.
 - **Working now:** Circom 2/Poseidon/Groth16 delegation proofs, independent snarkjs verification, the four SOC dashboard tabs, local JSONL audit export, alert records, manual grant-tree kill switch, and automatic grant-tree revocation after three denials within 60 seconds. Group mandates share a mission budget, but the roster is descriptive and does not issue member credentials.
-- **Not implemented:** a production trusted setup; authenticated human approvers; trusted data-label issuers and label propagation from real sources; real business-system connectors; a separately stored signed checkpoint; enterprise key management or tenancy; or a production deployment of this controller.
+- **Not implemented:** a production trusted setup; authenticated human approvers; trusted data-label issuers and label propagation from real sources; real business-system connectors; a separately stored signed checkpoint; enterprise key management or tenancy; or on-chain journal anchoring to Avalanche Fuji.
 - **Data-label limit:** the prototype applies its policy to the signed request’s declared label. It does not prove that a real source classified the data correctly or propagate labels through an external agent’s internal transformations. Private resource and destination values are represented in the journal by HMAC commitments made with the local controller key, so an exported journal alone cannot brute-force common low-entropy values.
 - **Receipt limit:** a receipt proves what this controller checked or observed. It does not prove that a model reasoned correctly or that an external tool’s response is true.
 
 ## Architecture and deployment status
 
-The controller is the enforcement point. The agent must not hold direct credentials for protected tools; if a tool call bypasses the controller, AgentSafe cannot protect it. The hosted Vercel application runs the FastAPI controller and stores missions, grants, alerts, artifacts, and journal events in Neon PostgreSQL. Local development defaults to SQLite. The Ed25519 signing key is a sensitive Vercel environment variable in hosted mode.
+The controller is the enforcement point. The agent must not hold direct credentials for protected tools; if a tool call bypasses the controller, AgentSafe cannot protect it. The hosted Vercel application runs the FastAPI controller and stores missions, grants, alerts, artifacts, and journal events in Neon PostgreSQL. Groth16 proof operations run through a separate Node.js Vercel function. Local development defaults to SQLite. The Ed25519 signing key is a sensitive Vercel environment variable in hosted mode.
 
 The hosted demo still uses synthetic agents and side-effect-free connectors. It does not connect to real email, procurement, or business systems. The controller currently does not submit journal commitments to Avalanche Fuji; the contract is not an active part of the hosted action flow. Delegation ZK proofs are generated and independently verified using a one-party development setup, not production ceremony parameters. Do not present the deployment as production-ready enforcement for a company’s agents.
 

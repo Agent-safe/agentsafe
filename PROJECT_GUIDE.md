@@ -6,6 +6,8 @@ An AI agent can have legitimate access to tools and still use them in a risky wa
 
 Think of the controller as a security checkpoint with a signed work order. The live hackathon console now runs this controller on Vercel with durable Neon PostgreSQL, Ed25519 signatures, and a hash-chained audit journal. The Avalanche Fuji contract is a separate evidence-anchoring component; the API currently does not submit journal roots on-chain, so do not claim that live controller decisions are anchored yet.
 
+Open the live console at <https://agentsafe-nu.vercel.app>. The deployed Python controller calls a separate Node.js Vercel function for Groth16 proof operations; this split avoids bundling a Node runtime into the Python function. The production URL is publicly reachable, and its agents/data remain synthetic.
+
 ## How the local demo works
 
 The running prototype is under `controller/`, not the old Next.js demo. Agent A and Agent B are nodes in a compiled LangGraph `StateGraph`; a third node passes each proposed action through AgentSafe. This particular test graph uses a deterministic fixture, not Mistral, so its allowed and blocked outcomes are repeatable. Start it with:
@@ -80,4 +82,4 @@ A valid signature means the event matches this controller’s signing key. It do
 - `controller/verify_export.py` — independent signed-journal verifier.
 - `controller/tests/test_controller.py` — end-to-end API checks, replay/tamper checks and cross-origin guard.
 - `PRODUCT_SPEC.md` — product requirements and status.
-- `app/api/simulate/agent.ts` — earlier LangGraph demo still used by the Vercel app; it is not the enforcement controller.
+- `app/api/simulate/agent.ts` — earlier LangGraph demo retained in the repository; the published app now serves the `controller/` enforcement prototype.
