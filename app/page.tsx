@@ -18,11 +18,13 @@ type ToolEvent = {
   decision: Decision;
   tag: string;
 };
+type DraftArtifact = { kind: "draft"; title: string; body: string };
 type AuditRecord = {
   runId: string;
   root: string;
   salt: string;
   events: ToolEvent[];
+  artifacts: DraftArtifact[];
   createdAt: string;
   engine: "mistral" | "replay";
   txHash?: string;
@@ -88,10 +90,10 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   return <svg {...common} aria-hidden="true">{paths[name] ?? paths.grid}</svg>;
 }
 
-function createAuditRecord(events: ToolEvent[], engine: AuditRecord["engine"] = "replay"): AuditRecord {
+function createAuditRecord(events: ToolEvent[], engine: AuditRecord["engine"] = "replay", artifacts: DraftArtifact[] = []): AuditRecord {
   const salt = hexlify(randomBytes(32));
-  const root = keccak256(toUtf8Bytes(`${salt}:${JSON.stringify(events)}`));
-  return { runId: `run_${hexlify(randomBytes(4)).slice(2)}`, root, salt, events, engine, createdAt: new Date().toISOString() };
+  const root = keccak256(toUtf8Bytes(`${salt}:${JSON.stringify({ events, artifacts })}`));
+  return { runId: `run_${hexlify(randomBytes(4)).slice(2)}`, root, salt, events, artifacts, engine, createdAt: new Date().toISOString() };
 }
 
 export default function Home() {
@@ -119,9 +121,10 @@ export default function Home() {
         body: JSON.stringify({ scenario: nextScenario }),
       });
       if (!response.ok) throw new Error("simulation-failed");
-      const result = await response.json() as { events?: ToolEvent[]; engine?: "mistral" | "replay" };
+      const result = await response.json() as { events?: ToolEvent[]; artifacts?: DraftArtifact[]; engine?: "mistral" | "replay" };
       if (!Array.isArray(result.events) || (result.engine !== "mistral" && result.engine !== "replay")) throw new Error("invalid-simulation");
-      const nextRecord = createAuditRecord(result.events, result.engine);
+      const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+      const nextRecord = createAuditRecord(result.events, result.engine, artifacts);
       saveAuditRecord(nextRecord);
       setNotice(`${nextScenario === "attack" ? "Attack" : "Safe"} simulation completed via ${result.engine === "mistral" ? "Mistral AI" : "fixed replay"}. Local evidence commitment is ready.`);
     } catch {
@@ -260,6 +263,7 @@ export default function Home() {
                   <span className={`event-tag ${event.decision}`}>{event.tag}</span>
                 </div>)}
               </div>
+              {record?.artifacts?.map((artifact, index) => <div className="draft-artifact" key={`${artifact.kind}-${index}`}><div className="draft-label">LOCAL DRAFT · NOT SENT</div><b>{artifact.title}</b><p>{artifact.body}</p></div>)}
               <div className="run-footer"><span><span className="mini-lock"><Icon name="lock" size={12} /></span> Raw events stay in this browser</span>{record && <a href="#events" onClick={() => setActiveNav("Run events")}>View run events <Icon name="arrow" size={14} /></a>}</div>
             </section>
 

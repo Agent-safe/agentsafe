@@ -139,6 +139,10 @@ h1 { margin: 10px 0 5px; font-size: 26px; line-height: 1.1; font-weight: 650; le
 .timeline-heading span:last-child { color: #637180; font-weight: 500; letter-spacing: 0; }
 .timeline { padding: 4px 16px 0; }
 .timeline-empty { padding: 20px 0 24px; color: #82909e; font-size: 11px; }
+.draft-artifact { margin: 0 16px 12px 44px; padding: 11px 12px; border: 1px solid #294135; border-radius: 7px; background: #101a17; }
+.draft-label { margin-bottom: 7px; color: #74d8a8; font: 700 8px var(--mono); letter-spacing: .7px; }
+.draft-artifact b { color: #dbe8e0; font-size: 10px; }
+.draft-artifact p { margin: 6px 0 0; color: #98a79e; font-size: 9px; line-height: 1.5; white-space: pre-wrap; }
 .empty-state { display: grid; gap: 6px; margin: 0 16px; padding: 16px; border: 1px dashed #334150; border-radius: 7px; color: #8f9dac; font-size: 10px; line-height: 1.5; }
 .empty-state b { color: #dbe4ee; font-size: 11px; }
 .timeline-row { display: grid; grid-template-columns: 17px minmax(0,1fr) auto; gap: 10px; min-height: 56px; }

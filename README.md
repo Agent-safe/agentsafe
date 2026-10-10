@@ -8,7 +8,7 @@ AgentSafe is a hackathon proof of concept for supervising AI-agent tool calls. I
 - The browser can create a salted commitment over an event record and verify its timestamp on Fuji.
 - Raw event details stay in the browser. The contract accepts only a `bytes32` root; it does not receive prompts, arguments, user data, or the salt.
 
-This demo uses synthetic events, a Mistral-proposed tool call, a deterministic local policy gate, and local browser storage. Mistral only proposes a synthetic tool call; AgentSafe evaluates it and never executes the proposal. If the Mistral key is missing or the service is unavailable, a fixed replay runs instead. It is not a production agent gateway, does not intercept arbitrary frameworks, and does not claim to detect all prompt injection or agent abuse.
+This demo runs a real Mistral tool-call proposal against synthetic data. The server actually looks up the synthetic ticket and searches a local knowledge fixture. A separate policy gate evaluates the proposed action: an unapproved email is blocked and never sent; the safe path creates a local draft and returns it to the browser. The run and draft are saved in that browser. If Mistral is unavailable, a deterministic synthetic replay runs instead. This is not yet a production agent gateway: it does not intercept an independently running agent or connect to external tools, and it does not claim to detect all prompt injection or agent abuse.
 
 ## Run the dashboard
 
@@ -39,7 +39,7 @@ Network details: Fuji C-Chain RPC `https://api.avax-test.network/ext/bc/C/rpc`, 
 
 ## Evidence model
 
-The app generates a random 32-byte salt and computes `keccak256(UTF8(salt + ':' + JSON.stringify(events)))`. The salt and events are stored in browser `localStorage`; only the resulting root is submitted to `AuditAnchor`. Keep the salt with the local evidence record: without it, a third party cannot independently reproduce the commitment. Treat browser storage as demo storage, not durable or access-controlled evidence retention.
+The app generates a random 32-byte salt and computes `keccak256(UTF8(salt + ':' + JSON.stringify({events, artifacts})))`. The salt, event trace, and any local draft artifact are stored in browser `localStorage`; only the resulting root is submitted to `AuditAnchor`. Keep the salt with the local evidence record: without it, a third party cannot independently reproduce the commitment. Treat browser storage as demo storage, not durable or access-controlled evidence retention.
 
 ## Track framing
 
