@@ -21,10 +21,15 @@ Then open <http://127.0.0.1:8765> and click **Start policy demo**. The controlle
 Before starting the controller for the first time, initialize its real delegation proof circuit from the repository root:
 
 ```bash
-cd zk && npm ci && npm run setup
+cd zk
+npm ci
+npm run setup
+cd ../controller
+uv sync
+uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-The setup creates local Groth16 keys for the compiled Circom circuit. A delegation is issued only after the proof is generated and independently checked by a separate snarkjs verifier process. The one-party development setup is not a production ceremony.
+The setup step creates local Groth16 keys for the compiled Circom circuit. A delegation is issued only after the proof is generated and independently checked by a separate snarkjs verifier process. The one-party development setup is not a production ceremony.
 
 The first policy run shows:
 
