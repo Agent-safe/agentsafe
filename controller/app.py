@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
@@ -62,6 +63,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="AgentSafe Local Controller", version="0.1.0", description="Local authorization gate, demo connectors, signed receipts and verifiable journal.", lifespan=lifespan)
+app.mount("/assets", StaticFiles(directory=ROOT / "ui" / "assets", check_dir=False), name="dashboard-assets")
 DEMO_AGENT_KEYS: dict[str, Ed25519PrivateKey] = {}
 _DB_INITIALIZED = False
 _DB_INIT_LOCK = threading.Lock()

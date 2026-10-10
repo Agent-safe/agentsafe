@@ -101,7 +101,7 @@ flowchart LR
 
 | Component | Technology | Job |
 | --- | --- | --- |
-| Security console | HTML, CSS, browser JavaScript | Show tenant state and invoke the API |
+| Security console | React, Material UI, Vite | Responsive dashboard served by the controller; reads and changes persisted company-demo state through the same API |
 | Policy API | Python, FastAPI, Pydantic | Verify grants, evaluate policy, control connectors, sign receipts |
 | Durable demo data | Supabase PostgreSQL session pooler | Persist missions, grants, approvals, alerts, artifacts, journal, and anchor records |
 | Local isolated mode | SQLite | Run a developer-only instance without shared hosted state |
@@ -142,7 +142,7 @@ The local deterministic workflow is separately labeled. It does not call any mod
 
 ## What is real in this demo and what is not
 
-**Working product paths:** the browser console reads persisted API state; the controller issues and checks signed mandates; the deterministic LangGraph scenario exercises policy decisions and local demo connectors; the Groth16 delegation proof is generated and verified; Supabase Postgres persists hosted state; the journal verifier checks signatures and hashes; JSONL is exportable; the deployed Fuji contract can store and verify salted checkpoints after a wallet transaction is confirmed.
+**Working product paths:** the Material UI console reads persisted API state; the controller issues and checks signed mandates; the deterministic LangGraph scenario exercises policy decisions and local demo connectors; the Groth16 delegation proof is generated and verified; Supabase Postgres persists hosted state; the journal verifier checks signatures and hashes; JSONL is exportable; the deployed Fuji contract can store and verify salted checkpoints after a wallet transaction is confirmed.
 
 **Requires customer integration or AWS setup:** real procurement, email, finance, identity-provider, and SIEM integrations; production AgentCore and OpenSearch resources; authenticated approver identities; individual group-member credentials; key rotation and recovery; audited ZK setup; retention and backup controls; and operational monitoring.
 

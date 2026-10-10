@@ -3,7 +3,7 @@
     "app.py": {
       "maxDuration": 300,
       "includeFiles": "ui/**",
-      "excludeFiles": "{node_modules/**,zk/**}"
+      "excludeFiles": "{node_modules/**,zk/**,.data/**,.venv/**,.pytest_cache/**,tests/**,ui-app/**}"
     },
     "api/zk.mjs": {
       "maxDuration": 300,
