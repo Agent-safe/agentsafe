@@ -113,7 +113,7 @@ function evaluateProposal(scenario: Scenario, proposal: { name?: string; args: R
 
   if (proposal.name === "mail_send") {
     const recipient = typeof proposal.args.recipient === "string" ? proposal.args.recipient.toLowerCase() : "";
-    const isApprovedDomain = recipient.endsWith("@example.org");
+    const isApprovedDomain = /^[^@\s]+@example\.org$/i.test(recipient);
     const events: ToolEvent[] = [
       { time: clock(0), tool: "ticket.lookup", detail: "Read synthetic ticket #1842", decision: "allowed", tag: "Read" },
       { time: clock(0.2), tool: "kb.search", detail: "Search internal help articles", decision: "allowed", tag: "Read" },

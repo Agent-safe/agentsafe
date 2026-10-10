@@ -19,6 +19,7 @@ type ToolEvent = {
   tag: string;
 };
 type AuditRecord = {
+  runId: string;
   root: string;
   salt: string;
   events: ToolEvent[];
@@ -65,20 +66,6 @@ function saveAuditRecord(record: AuditRecord) {
   auditSubscribers.forEach((listener) => listener());
 }
 
-const initialEvents: ToolEvent[] = [
-  { time: "16:42:08.103", tool: "ticket.lookup", detail: "Read synthetic ticket #1842", decision: "allowed", tag: "Read" },
-  { time: "16:42:08.421", tool: "kb.search", detail: "Search internal help articles", decision: "allowed", tag: "Read" },
-  { time: "16:42:09.017", tool: "mail.send", detail: "Send ticket context to an unapproved domain", decision: "blocked", tag: "Exfiltration" },
-  { time: "16:42:09.022", tool: "agent.pause", detail: "Run paused; analyst review required", decision: "review", tag: "Human review" },
-];
-
-const safeEvents: ToolEvent[] = [
-  { time: "16:45:12.054", tool: "ticket.lookup", detail: "Read synthetic ticket #1842", decision: "allowed", tag: "Read" },
-  { time: "16:45:12.287", tool: "kb.search", detail: "Search internal help articles", decision: "allowed", tag: "Read" },
-  { time: "16:45:12.901", tool: "draft.create", detail: "Prepare a reply for analyst review", decision: "allowed", tag: "Draft" },
-  { time: "16:45:13.116", tool: "agent.complete", detail: "Run ended without external delivery", decision: "allowed", tag: "Complete" },
-];
-
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   const paths: Record<string, React.ReactNode> = {
@@ -104,7 +91,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
 function createAuditRecord(events: ToolEvent[], engine: AuditRecord["engine"] = "replay"): AuditRecord {
   const salt = hexlify(randomBytes(32));
   const root = keccak256(toUtf8Bytes(`${salt}:${JSON.stringify(events)}`));
-  return { root, salt, events, engine, createdAt: new Date().toISOString() };
+  return { runId: `run_${hexlify(randomBytes(4)).slice(2)}`, root, salt, events, engine, createdAt: new Date().toISOString() };
 }
 
 export default function Home() {
@@ -113,7 +100,7 @@ export default function Home() {
     if (!savedAudit) return null;
     try { return JSON.parse(savedAudit) as AuditRecord; } catch { return null; }
   }, [savedAudit]);
-  const events = record?.events ?? initialEvents;
+  const events = useMemo(() => record?.events ?? [], [record]);
   const [wallet, setWallet] = useState("");
   const [isAnchoring, setIsAnchoring] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
@@ -138,9 +125,7 @@ export default function Home() {
       saveAuditRecord(nextRecord);
       setNotice(`${nextScenario === "attack" ? "Attack" : "Safe"} simulation completed via ${result.engine === "mistral" ? "Mistral AI" : "fixed replay"}. Local evidence commitment is ready.`);
     } catch {
-      const nextRecord = createAuditRecord(nextScenario === "attack" ? initialEvents : safeEvents, "replay");
-      saveAuditRecord(nextRecord);
-      setNotice("The simulation API was unavailable; a fixed synthetic replay was used. Local evidence commitment is ready.");
+      setNotice("The simulation service could not be reached; no run was recorded. Check your connection and retry.");
     } finally {
       setIsSimulating(false);
     }
@@ -218,70 +203,68 @@ export default function Home() {
           <span className="brand-beta">BETA</span>
         </a>
         <div className="workspace-switcher">
-          <span className="workspace-avatar">A</span>
-          <span className="workspace-copy"><b>Acme Security</b><small>Workspace</small></span>
-          <span className="switch-chevron">⌄</span>
+          <span className="workspace-avatar"><Icon name="activity" size={16} /></span>
+          <span className="workspace-copy"><b>Local demo</b><small>Synthetic data · this browser</small></span>
         </div>
-        <div className="side-label">WORKSPACE</div>
-        <nav className="side-nav" aria-label="Main navigation">
-          {[["Overview", "grid"], ["Agent runs", "activity"], ["Audit evidence", "list"], ["Policies", "shield"]].map(([label, icon]) => (
-            <button className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} onClick={() => setActiveNav(label)}>
-              <Icon name={icon} size={17} /><span>{label}</span>{label === "Agent runs" && <span className="nav-count">04</span>}
-            </button>
+        <div className="side-label">DEMO</div>
+        <nav className="side-nav" aria-label="Demo sections">
+          {[["Overview", "grid", "overview"], ["Current run", "activity", "agent-run"], ["Audit evidence", "list", "evidence"], ["Policy", "shield", "policies"], ["Run events", "list", "events"]].map(([label, icon, target]) => (
+            <a className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} href={`#${target}`} onClick={() => setActiveNav(label)}>
+              <Icon name={icon} size={17} /><span>{label}</span>
+            </a>
           ))}
-        </nav>
-        <div className="side-label side-label-spaced">MONITORING</div>
-        <nav className="side-nav" aria-label="Monitoring navigation">
-          <button className="nav-item" onClick={() => setActiveNav("Tool calls")}><Icon name="list" size={17} /><span>Tool calls</span><span className="live-dot" /></button>
-          <button className="nav-item" onClick={() => setActiveNav("Integrations")}><Icon name="chain" size={17} /><span>Integrations</span></button>
         </nav>
         <div className="sidebar-spacer" />
         <div className="chain-card">
-          <div className="chain-card-head"><span className="chain-icon">A</span><div><b>Avalanche Fuji</b><small>TEST NETWORK</small></div><span className="status-dot" /></div>
-          <p>Only salted evidence hashes are written on-chain.</p>
+          <div className="chain-card-head"><span className="chain-icon">A</span><div><b>Avalanche Fuji</b><small>TEST NETWORK</small></div></div>
+          <p>{CONTRACT_ADDRESS ? "Only salted evidence hashes are written on-chain." : "Contract is not deployed yet; evidence remains local."}</p>
           <a href="https://build.avax.network/explorer/fuji/c-chain" target="_blank" rel="noreferrer">Explore network <Icon name="external" size={12} /></a>
         </div>
-        <button className="profile-row" onClick={() => setNotice("Demo workspace. No user accounts or real customer data are connected.")}>
-          <span className="profile-avatar">AM</span><span><b>Alex Morgan</b><small>Security analyst</small></span><Icon name="dots" size={18} />
-        </button>
+        <div className="profile-row"><span className="profile-avatar"><Icon name="lock" size={14} /></span><span><b>{wallet ? "Fuji wallet connected" : "No wallet connected"}</b><small>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Audit data stays in this browser"}</small></span></div>
       </aside>
 
       <section className="main-area" id="overview">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{activeNav}</strong></div>
-          <div className="top-actions"><div className="search-box"><Icon name="search" size={16} /><span>Search anything...</span><kbd>⌘ K</kbd></div><button className="icon-button" aria-label="Notifications" onClick={() => setNotice("You’re all caught up.")}>♧<i /></button><button className="help-button" onClick={() => setNotice("AgentSafe demo: simulate an unsafe run, inspect the block, then anchor its evidence hash to Fuji.")}>Help center</button></div>
+          <div className="breadcrumbs"><span>AgentSafe</span><b>/</b><strong>{activeNav}</strong></div>
+          <div className="top-actions"><span className="demo-chip">SYNTHETIC RUNNER</span><button className="help-button" onClick={() => setNotice("Run a synthetic scenario, inspect the policy decision, then anchor its salted hash on Fuji after the contract is deployed.")}>How it works</button></div>
         </header>
 
         <div className="page-content">
           <div className="page-heading">
-            <div><div className="eyebrow"><span className="pulse-dot" /> THREAT MONITORING <span className="eyebrow-sep">/</span> SYNTHETIC DEMO</div><h1>Security overview</h1><p>Keep AI agents accountable, one tool call at a time.</p></div>
+            <div><div className="eyebrow"><span className="pulse-dot" /> SYNTHETIC DEMO <span className="eyebrow-sep">/</span> TEST EACH STEP</div><h1>Put a safety check<br className="desktop-break" /> before an AI action</h1><p>The AI proposes an action. AgentSafe checks it. Risky requests are stopped before they run.</p></div>
             <div className="heading-actions"><button className="button button-secondary" onClick={connectWallet}><Icon name="wallet" size={16} />{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Connect wallet"}</button><button className="button button-primary" onClick={() => runScenario("attack")} disabled={isSimulating}><Icon name="play" size={15} />{isSimulating ? "Simulating…" : "Run attack simulation"}</button></div>
           </div>
 
+          <section className="idea-flow" aria-label="How AgentSafe works">
+            <div><span>1</span><b>AI proposes</b><small>For example: send a support reply</small></div>
+            <div><span>2</span><b>Policy checks</b><small>Is this destination allowed?</small></div>
+            <div><span>3</span><b>Stop or allow</b><small>Keep a private proof of the decision</small></div>
+          </section>
+
           <div className="metrics-grid">
-            <article className="metric-card"><div className="metric-top"><span>Tool calls in run</span><span className="metric-icon blue"><Icon name="activity" size={17} /></span></div><div className="metric-value">{events.length}</div><div className="metric-foot"><span className="status-label">Synthetic run</span><span>current trace</span><div className="sparkline blue-line"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div></article>
-            <article className="metric-card"><div className="metric-top"><span>Blocked in run</span><span className="metric-icon red"><Icon name="shield" size={17} /></span></div><div className="metric-value">{blockedCount}</div><div className="metric-foot"><span className="status-label red-label"><span />Policy decision</span><span>current trace</span><div className="sparkline red-line"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div></article>
-            <article className="metric-card"><div className="metric-top"><span>Pending review</span><span className="metric-icon amber"><Icon name="clock" size={17} /></span></div><div className="metric-value">{events.filter((event) => event.decision === "review").length}</div><div className="metric-foot"><span className="status-label amber-label"><span />Review decisions</span><span>current trace</span><div className="sparkline amber-line"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div></article>
-            <article className="metric-card"><div className="metric-top"><span>Evidence status</span><span className="metric-icon green"><Icon name="lock" size={16} /></span></div><div className="metric-value">{record?.txHash ? "Anchored" : record ? "Local" : "None"}</div><div className="metric-foot"><span className="status-label green-label"><span />{record?.txHash ? "Confirmed on Fuji" : "Not on-chain yet"}</span><span>hash commitment</span><div className="sparkline green-line"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Tool calls in this run</span><span className="metric-icon blue"><Icon name="activity" size={17} /></span></div><div className="metric-value">{events.length}</div><div className="metric-foot"><span>{record ? "Synthetic trace" : "No run yet"}</span><span>{record ? "current run" : "run a scenario to begin"}</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Blocked</span><span className="metric-icon red"><Icon name="shield" size={17} /></span></div><div className="metric-value">{blockedCount}</div><div className="metric-foot"><span>Policy result</span><span>current run</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Needs review</span><span className="metric-icon amber"><Icon name="clock" size={17} /></span></div><div className="metric-value">{events.filter((event) => event.decision === "review").length}</div><div className="metric-foot"><span>Human review decisions</span><span>current run</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Evidence</span><span className="metric-icon green"><Icon name="lock" size={16} /></span></div><div className="metric-value">{record?.txHash ? "On-chain" : record ? "Local" : "None"}</div><div className="metric-foot"><span>{record?.txHash ? "Confirmed on Fuji" : "Not on-chain"}</span><span>salted hash</span></div></article>
           </div>
 
           <div className="content-grid">
-            <section className="panel run-panel">
-              <div className="panel-header"><div><div className="section-kicker">SYNTHETIC AGENT SESSION <span className="live-pill"><i />DEMO</span></div><h2>Latest monitored run</h2><small className="section-kicker">Engine: {record?.engine === "mistral" ? "Mistral AI proposal + local policy gate" : "Fixed local replay"}</small></div><button className="more-button" aria-label="More run options" onClick={() => setNotice("Showing the most recent synthetic demo run.")}><Icon name="dots" /></button></div>
-              <div className="run-meta"><div className="agent-avatar">✳</div><div className="agent-details"><b>support-assistant <span className="version">v2.4.1</span></b><small>Run ID <code>run_8f2a91c</code><span className="meta-divider">·</span>Started just now</small></div><span className="contained-chip"><span />{blockedCount ? "Threat contained" : "Run completed"}</span></div>
+            <section className="panel run-panel" id="agent-run">
+              <div className="panel-header"><div><div className="section-kicker">SYNTHETIC SCENARIO</div><h2>Current run</h2><small className="section-kicker">{record ? record.engine === "mistral" ? "Mistral proposal · local policy gate" : "Fixed replay · local policy gate" : "No agent or external tools are connected"}</small></div></div>
+              {record ? <div className="run-meta"><div className="agent-avatar"><Icon name="activity" size={17} /></div><div className="agent-details"><b>Synthetic support flow</b><small>Run ID <code>{record.runId ?? "saved-local-run"}</code><span className="meta-divider">·</span>{new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(record.createdAt))}</small></div><span className="contained-chip"><span />{blockedCount ? "Blocked by policy" : "Completed"}</span></div> : <div className="empty-state"><b>No run yet</b><span>Choose a synthetic scenario above. It uses no real agent, account or customer data.</span></div>}
               <div className="timeline-heading"><span>TOOL CALL TIMELINE</span><span>{events.length} events</span></div>
               <div className="timeline">
-                {events.map((event, index) => <div className={`timeline-row ${event.decision}`} key={`${event.time}-${index}`}>
+                {events.length === 0 ? <div className="timeline-empty">Run an attack or safe scenario to create a trace.</div> : events.map((event, index) => <div className={`timeline-row ${event.decision}`} key={`${event.time}-${index}`}>
                   <div className="timeline-rail"><span className="timeline-marker">{event.decision === "allowed" ? <Icon name="check" size={12} /> : event.decision === "blocked" ? "!" : <Icon name="clock" size={12} />}</span>{index < events.length - 1 && <i />}</div>
                   <div className="timeline-event"><div className="event-top"><b>{event.tool}</b><time>{event.time}</time></div><p>{event.detail}</p></div>
                   <span className={`event-tag ${event.decision}`}>{event.tag}</span>
                 </div>)}
               </div>
-              <div className="run-footer"><span><span className="mini-lock"><Icon name="lock" size={12} /></span> Raw events stay in this browser</span><button onClick={() => setActiveNav("Agent runs")}>View run details <Icon name="arrow" size={14} /></button></div>
+              <div className="run-footer"><span><span className="mini-lock"><Icon name="lock" size={12} /></span> Raw events stay in this browser</span>{record && <a href="#events" onClick={() => setActiveNav("Run events")}>View run events <Icon name="arrow" size={14} /></a>}</div>
             </section>
 
             <aside className="right-column">
-              <section className="panel evidence-panel">
+              <section className="panel evidence-panel" id="evidence">
                 <div className="panel-header"><div><div className="section-kicker">AUDIT EVIDENCE</div><h2>Proof of integrity</h2></div><span className="evidence-emblem"><Icon name="lock" size={17} /></span></div>
                 <p className="evidence-copy">Anchor a salted fingerprint of this run. Event details never leave your device.</p>
                 <div className="proof-box"><div className="proof-label"><span>RUN COMMITMENT</span><span className="proof-ready"><i />{record?.txHash ? "CONFIRMED" : record ? "READY" : "NOT CREATED"}</span></div><code>{record?.root ?? "Run a simulation to create a proof"}</code><button className="copy-button" onClick={async () => { if (record) { await navigator.clipboard.writeText(record.root); setNotice("Commitment copied."); } }} aria-label="Copy commitment" disabled={!record}>⧉</button></div>
@@ -290,23 +273,20 @@ export default function Home() {
                 {!CONTRACT_ADDRESS && <p className="config-hint">The evidence hash is local only until the Fuji contract is deployed and configured.</p>}
               </section>
 
-              <section className="panel policy-panel">
-                <div className="panel-header"><div><div className="section-kicker">POLICY ENGINE</div><h2>Active guardrails</h2></div><button className="view-all" onClick={() => setActiveNav("Policies")}>View all</button></div>
-                <div className="policy-row"><span className="policy-symbol purple"><Icon name="shield" size={15} /></span><div><b>External data transfer</b><small>Block unapproved destinations</small></div><span className="policy-state">ACTIVE</span></div>
-                <div className="policy-row"><span className="policy-symbol orange"><Icon name="lock" size={15} /></span><div><b>Sensitive context guard</b><small>Pause before sharing records</small></div><span className="policy-state">ACTIVE</span></div>
-                <div className="policy-row"><span className="policy-symbol cyan"><Icon name="activity" size={15} /></span><div><b>Tool sequence anomaly</b><small>Flag unusual call patterns</small></div><span className="policy-state">ACTIVE</span></div>
+              <section className="panel policy-panel" id="policies">
+                <div className="panel-header"><div><div className="section-kicker">LOCAL POLICY GATE</div><h2>Rules used in this demo</h2></div></div>
+                <div className="policy-row"><span className="policy-symbol purple"><Icon name="shield" size={15} /></span><div><b>Outbound email recipient</b><small>Block destinations outside @example.org; route allowed-domain calls to review.</small></div><span className="policy-state">ENFORCED</span></div>
+                <div className="policy-row"><span className="policy-symbol orange"><Icon name="lock" size={15} /></span><div><b>No external action execution</b><small>Mistral tool calls are proposals; the demo never sends email.</small></div><span className="policy-state">ENFORCED</span></div>
               </section>
             </aside>
           </div>
 
-          <section className="panel activity-panel">
-            <div className="panel-header"><div><div className="section-kicker">RECENT ACTIVITY</div><h2>Events across your workspace</h2></div><button className="button button-secondary small-button" onClick={() => runScenario("safe")} disabled={isSimulating}>Run safe simulation <Icon name="play" size={13} /></button></div>
+          <section className="panel activity-panel" id="events">
+            <div className="panel-header"><div><div className="section-kicker">LOCAL TRACE</div><h2>Events in this run</h2></div><button className="button button-secondary small-button" onClick={() => runScenario("safe")} disabled={isSimulating}>Run safe scenario <Icon name="play" size={13} /></button></div>
             <div className="activity-table-wrap"><table className="activity-table"><thead><tr><th>EVENT</th><th>AGENT</th><th>RISK</th><th>DECISION</th><th>TIME</th><th /></tr></thead><tbody>
-              <tr><td><span className="table-icon danger">↗</span><div><b>Unapproved data destination</b><small>mail.send · external domain</small></div></td><td><span className="agent-mini">✳</span>support-assistant</td><td><span className="risk-high">High</span></td><td><span className="decision-blocked"><i />Blocked</span></td><td>Just now</td><td><button className="row-open" onClick={() => setActiveNav("Agent runs")} aria-label="Open event">↗</button></td></tr>
-              <tr><td><span className="table-icon warning">⌁</span><div><b>Repeated lookup pattern</b><small>kb.search · 18 calls / 2s</small></div></td><td><span className="agent-mini lavender">◈</span>research-agent</td><td><span className="risk-medium">Medium</span></td><td><span className="decision-review"><i />Review</span></td><td>4 min ago</td><td><button className="row-open" onClick={() => setActiveNav("Agent runs")} aria-label="Open event">↗</button></td></tr>
-              <tr><td><span className="table-icon success">✓</span><div><b>Draft prepared for review</b><small>draft.create · internal only</small></div></td><td><span className="agent-mini mint">✳</span>support-assistant</td><td><span className="risk-low">Low</span></td><td><span className="decision-allowed"><i />Allowed</span></td><td>12 min ago</td><td><button className="row-open" onClick={() => setActiveNav("Agent runs")} aria-label="Open event">↗</button></td></tr>
+              {events.map((event, index) => <tr key={`${event.time}-${event.tool}-${index}`}><td><span className={`table-icon ${event.decision === "blocked" ? "danger" : event.decision === "review" ? "warning" : "success"}`}>{event.decision === "blocked" ? "!" : event.decision === "review" ? "⌁" : "✓"}</span><div><b>{event.detail}</b><small>{event.tool}</small></div></td><td>Synthetic flow</td><td><span className={event.decision === "blocked" ? "risk-high" : event.decision === "review" ? "risk-medium" : "risk-low"}>{event.decision === "blocked" ? "High" : event.decision === "review" ? "Review" : "Low"}</span></td><td><span className={event.decision === "blocked" ? "decision-blocked" : event.decision === "review" ? "decision-review" : "decision-allowed"}><i />{event.decision}</span></td><td>{event.time}</td><td /></tr>)}
             </tbody></table></div>
-            <div className="table-footer"><span>Showing synthetic demo activity</span><button onClick={() => setActiveNav("Audit evidence")}>Open audit trail <Icon name="arrow" size={13} /></button></div>
+            <div className="table-footer"><span>{events.length ? "Synthetic data · stored in this browser" : "No events yet. Run a scenario to create a local trace."}</span>{record && <a href="#evidence" onClick={() => setActiveNav("Audit evidence")}>Open audit evidence <Icon name="arrow" size={13} /></a>}</div>
           </section>
 
           <footer className="page-footer"><span>AGENTSAFE <span>·</span> DEFENDERS IN CONTROL</span><span>Demo data only <i /> Fuji testnet</span></footer>
