@@ -35,6 +35,8 @@ forge create --rpc-url https://api.avax-test.network/ext/bc/C/rpc \
 
 Keep `FUJI_DEPLOYER_PRIVATE_KEY` in a local shell or secret manager. Never commit it or enter a seed phrase into the app. The returned contract address can be configured as `NEXT_PUBLIC_AUDIT_ANCHOR_ADDRESS` in local `.env.local` and in the AgentSafe Vercel project. The browser wallet used for anchoring must be on Fuji and hold test AVAX. A local proof does not become a chain proof until its transaction is confirmed and a transaction link is visible in the UI.
 
+The verified hackathon deployment is [`0xde5648cded04c9eca1124234867780604f89ff7e`](https://build.avax.network/explorer/fuji/c-chain/address/0xde5648cded04c9eca1124234867780604f89ff7e), deployed by [transaction `0x52522a39a0afc395ff0f321917cb9b9f8c84ea6b17223172510497ac2219f8c0`](https://build.avax.network/explorer/fuji/c-chain/tx/0x52522a39a0afc395ff0f321917cb9b9f8c84ea6b17223172510497ac2219f8c0). An accidental duplicate deployment also succeeded at `0x62c3b9da843e66d45112ea5822b643a8e061962a`; both have matching runtime bytecode, and the app uses the later deployment above.
+
 Network details: Fuji C-Chain RPC `https://api.avax-test.network/ext/bc/C/rpc`, chain ID `43113`, explorer [Avalanche Fuji C-Chain](https://build.avax.network/explorer/fuji/c-chain).
 
 ## Evidence model
