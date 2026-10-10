@@ -4,15 +4,22 @@ AgentSafe is a local control layer for AI agents. An agent signs a proposed tool
 
 ## Run the working local prototype
 
-Requirements: Python 3.10+ and [`uv`](https://docs.astral.sh/uv/).
+Requirements: Python 3.10+, Node.js 20+, npm, and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-cd controller
+cd zk
+npm ci
+npm run setup
+cd ../controller
 uv sync
 uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-Open <http://127.0.0.1:8765>. Click **Start policy demo**, inspect the real allow/block decisions, then explicitly click **Approve exact $70 local demo order**. The approved operation creates a local SQLite artifact; it does not contact a supplier or move money. The page shows the root-to-child grant graph, local mission spend, signed journal state, and individual policy outcomes. `/docs` exposes the API.
+`npm run setup` compiles the Circom delegation circuit and creates local Groth16 proving/verifying keys. This is a development-only one-party setup, not an audited production ceremony. The app fails closed if proof generation or independent verification fails.
+
+Open <http://127.0.0.1:8765>. Click **Start policy demo**, inspect the real allow/block decisions, then explicitly click **Approve exact $70 local demo order**. The approved operation creates a local SQLite artifact; it does not contact a supplier or move money. Four SOC tabs expose persisted grants, group policies, signed JSONL audit events, and alerts/kill switches. `/docs` exposes the API.
+
+Group policies create a signed group-principal mandate and shared mission budget. The MVP roster is descriptive only: member-specific credentials are not minted, so the product does not claim to enforce individual group membership.
 
 The local controller is deliberately bound to loopback. State lives in `controller/.data/` by default; set `AGENTSAFE_DATA_DIR` to choose another local directory. The Ed25519 controller key is generated on first run and kept in that directory. Never commit or share it. Browser-driven state changes reject cross-origin requests.
 
@@ -41,7 +48,8 @@ The prototype connectors are `records.share_local` and `procurement.create_order
 ## What is implemented and what is not
 
 - **Working now:** local FastAPI controller, Pydantic validation, SQLite transactions, Ed25519-signed mandates and agent requests, parent-signed scoped delegation, parent budget reservation, cumulative spend checks, expiry/revocation, one-use exact-parameter approval, fail-closed pre-execution journal write, two local-only connectors, signed receipts, hash-chained events, export verifier, and an interactive local console. The demo’s two deterministic agents and handoff run through a compiled LangGraph `StateGraph`; this is a repeatable policy test harness, not an LLM-generated run.
-- **Not implemented:** Circom/Groth16 delegation proofs; a production trusted setup; authenticated human approvers; trusted data-label issuers and label propagation from real sources; real business-system connectors; a separately stored signed checkpoint; enterprise key management, tenancy, or a production deployment.
+- **Working now:** Circom 2/Poseidon/Groth16 delegation proofs, independent snarkjs verification, the four SOC dashboard tabs, local JSONL audit export, alert records, manual grant-tree kill switch, and automatic grant-tree revocation after three denials within 60 seconds. Group mandates share a mission budget, but the roster is descriptive and does not issue member credentials.
+- **Not implemented:** a production trusted setup; authenticated human approvers; trusted data-label issuers and label propagation from real sources; real business-system connectors; a separately stored signed checkpoint; enterprise key management or tenancy; or a production deployment of this controller.
 - **Data-label limit:** the prototype applies its policy to the signed request’s declared label. It does not prove that a real source classified the data correctly or propagate labels through an external agent’s internal transformations. Private resource and destination values are represented in the journal by HMAC commitments made with the local controller key, so an exported journal alone cannot brute-force common low-entropy values.
 - **Receipt limit:** a receipt proves what this controller checked or observed. It does not prove that a model reasoned correctly or that an external tool’s response is true.
 

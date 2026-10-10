@@ -18,6 +18,14 @@ uv run uvicorn app:app --host 127.0.0.1 --port 8765
 
 Then open <http://127.0.0.1:8765> and click **Start policy demo**. The controller creates a mission for Agent A, signs its mandate, and accepts a delegation signed by A that gives Agent B a smaller budget and tool scope. Agent B signs each proposed action.
 
+Before starting the controller for the first time, initialize its real delegation proof circuit from the repository root:
+
+```bash
+cd zk && npm ci && npm run setup
+```
+
+The setup creates local Groth16 keys for the compiled Circom circuit. A delegation is issued only after the proof is generated and independently checked by a separate snarkjs verifier process. The one-party development setup is not a production ceremony.
+
 The first policy run shows:
 
 1. A confidential record sent to an internal destination is allowed and saved as a local artifact.
@@ -52,8 +60,10 @@ A valid signature means the event matches this controller’s signing key. It do
 - The local API and console are running, tested together, and backed by SQLite on this machine.
 - The two demo agents and handoff are represented in LangGraph. The scenario is deliberately deterministic; it does not call an LLM.
 - There is no real customer data, Gmail integration, external purchase tool, or business connector in the demo.
+- Four SOC tabs show persisted grant inventory, group-principal policies and shared mission budgets, audit events/JSONL export, and active alerts with manual/automatic kill switches. Denials are classified as ASI02 tool misuse, ASI03 privilege/budget abuse, or crypto signature/replay alerts. Three denied calls by one grant within 60 seconds revoke that grant and descendants.
+- A group policy has a signed group principal and shared budget, but listed member names are only a roster. Per-member cryptographic credentials and membership enforcement are not implemented.
 - Data labels are supplied on signed requests. The prototype does not yet have trusted source connectors that assign labels or preserve them through real agent transformations.
-- The baseline implementation checks delegation subsets directly and signs the resulting mandate. The Circom/Poseidon/Groth16 zero-knowledge delegation proof described in the product proposal is not implemented. The UI and API identify this rather than claiming a proof exists.
+- Delegation now generates a Circom/Poseidon/Groth16 zero-knowledge proof that the child mandate preserves the parent mission and does not expand its bounded scope, budget, expiry, or delegation/data flags. The API stores the proof and public signals and provides a separate verification endpoint. This proves only the encoded relation; it does not make the whole controller private or production-audited.
 - Human approvals are local demo records. Enterprise identity, approver roles, MFA, and authenticated approval policy remain to be built.
 - There is no independently held signed checkpoint for journal-tail deletion detection, no enterprise key manager, and no multi-tenant service.
 - The deployed `agentsafe-nu.vercel.app` site is the earlier synthetic LangGraph dashboard. It is not connected to this SQLite controller. Do not use it as proof an operating agent is protected. The controller stays local because Vercel’s serverless disk is not the durable client-local database the design needs.

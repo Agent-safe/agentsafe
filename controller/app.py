@@ -10,18 +10,22 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import sqlite3
+import subprocess
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, TypedDict
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
@@ -31,6 +35,8 @@ DATA_DIR = Path(os.environ.get("AGENTSAFE_DATA_DIR", ROOT / ".data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("AGENTSAFE_DB", DATA_DIR / "agentsafe.sqlite3"))
 KEY_PATH = Path(os.environ.get("AGENTSAFE_SIGNING_KEY", DATA_DIR / "ed25519.key"))
+AUDIT_LOG_PATH = Path(os.environ.get("AGENTSAFE_AUDIT_LOG", DATA_DIR / "audit.log"))
+ZK_DIR = ROOT.parent / "zk"
 @asynccontextmanager
 async def lifespan(_app):
     init_db()
@@ -101,6 +107,48 @@ def private_fingerprint(value: str | None) -> str | None:
     return private_commitment(value.encode()) if value is not None else None
 
 
+def zk_call(mode: str, payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+    try:
+        result = subprocess.run(["node", str(ZK_DIR / "tool.mjs"), mode], input=canonical(payload), capture_output=True, timeout=timeout, check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("ZK tool unavailable; install zk dependencies and generate the local proving key") from exc
+    try:
+        response = json.loads(result.stdout or b"{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ZK tool returned an invalid response") from exc
+    if result.returncode or response.get("error"):
+        raise RuntimeError(response.get("error", "ZK operation failed"))
+    return response
+
+
+def verify_zk_proof_independently(proof: dict[str, Any]) -> bool:
+    verifier = ZK_DIR / "verify.mjs"
+    with tempfile.NamedTemporaryFile("w", suffix=".json", dir=ZK_DIR, delete=False) as handle:
+        json.dump(proof, handle, separators=(",", ":"))
+        proof_path = Path(handle.name)
+    try:
+        result = subprocess.run(["node", str(verifier), str(proof_path)], capture_output=True, text=True, timeout=60, check=False)
+        return result.returncode == 0 and json.loads(result.stdout).get("valid") is True
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return False
+    finally:
+        proof_path.unlink(missing_ok=True)
+
+
+def budget_cents(value: float) -> int:
+    try:
+        cents = int(Decimal(str(value)) * 100)
+    except (InvalidOperation, ValueError) as exc:
+        raise HTTPException(422, "budget must be a decimal amount") from exc
+    if cents <= 0:
+        raise HTTPException(422, "budget must be at least one cent")
+    return cents
+
+
+def zk_mandate(mission_id: str, agent_public_key: str, actions: list[str], resources: list[str], constraints: dict[str, Any], budget: float, expires_at: int, can_delegate: bool, allow_external: bool, nonce: str) -> dict[str, Any]:
+    return {"missionId": mission_id, "agentPublicKey": agent_public_key, "actions": sorted(set(actions)), "resources": sorted(set(resources)), "parameterConstraints": constraints, "budgetCents": budget_cents(budget), "expiresAt": expires_at, "canDelegate": can_delegate, "allowExternal": allow_external, "nonce": nonce}
+
+
 def signer() -> Ed25519PrivateKey:
     if KEY_PATH.exists():
         return serialization.load_pem_private_key(KEY_PATH.read_bytes(), password=None)
@@ -145,10 +193,12 @@ def init_db() -> None:
     with transaction() as db:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS missions(id TEXT PRIMARY KEY, name TEXT NOT NULL, budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), agent_id TEXT NOT NULL, agent_public_key TEXT NOT NULL, parent_id TEXT REFERENCES grants(id), actions TEXT NOT NULL, resources TEXT NOT NULL, budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, budget_reserved REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, can_delegate INTEGER NOT NULL, allow_external INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, mandate TEXT NOT NULL, signature TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), agent_id TEXT NOT NULL, agent_public_key TEXT NOT NULL, parent_id TEXT REFERENCES grants(id), actions TEXT NOT NULL, resources TEXT NOT NULL, parameter_constraints TEXT NOT NULL DEFAULT '{}', budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, budget_reserved REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, can_delegate INTEGER NOT NULL, allow_external INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, mandate TEXT NOT NULL, signature TEXT NOT NULL, zk_nonce TEXT, zk_commitment TEXT, zk_proof TEXT, zk_public_signals TEXT, zk_proof_sha256 TEXT, zk_verified INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL, signature TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_id TEXT NOT NULL, tool TEXT NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY, code TEXT NOT NULL, severity TEXT NOT NULL, mission_id TEXT, grant_id TEXT, request_id TEXT, reason TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
+        CREATE TABLE IF NOT EXISTS agent_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL, department TEXT NOT NULL, budget_limit REAL NOT NULL, mission_id TEXT NOT NULL, grant_id TEXT NOT NULL, member_names TEXT NOT NULL, created_at INTEGER NOT NULL);
         """)
         # Upgrade databases created by earlier prototype iterations.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(grants)")}
@@ -156,6 +206,18 @@ def init_db() -> None:
             db.execute("ALTER TABLE grants ADD COLUMN budget_reserved REAL NOT NULL DEFAULT 0")
         if "agent_public_key" not in columns:
             db.execute("ALTER TABLE grants ADD COLUMN agent_public_key TEXT NOT NULL DEFAULT ''")
+        migrations = {
+            "parameter_constraints": "TEXT NOT NULL DEFAULT '{}'",
+            "zk_nonce": "TEXT",
+            "zk_commitment": "TEXT",
+            "zk_proof": "TEXT",
+            "zk_public_signals": "TEXT",
+            "zk_proof_sha256": "TEXT",
+            "zk_verified": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in migrations.items():
+            if column not in columns:
+                db.execute(f"ALTER TABLE grants ADD COLUMN {column} {definition}")
 
 
 def append_event(db: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]:
@@ -167,7 +229,13 @@ def append_event(db: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]
     digest = sha(bytes.fromhex(prev_hash) + canonical(content))
     signature = sign({"hash": digest, "event_id": event_id})
     db.execute("INSERT INTO events(event_id,created_at,body,prev_hash,hash,signature) VALUES(?,?,?,?,?,?)", (event_id, created_at, canonical(content).decode(), prev_hash, digest, signature))
-    return {**content, "prev_hash": prev_hash, "hash": digest, "signature": signature}
+    record = {**content, "prev_hash": prev_hash, "hash": digest, "signature": signature}
+    AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with AUDIT_LOG_PATH.open("ab") as log:
+        log.write(canonical(record) + b"\n")
+        log.flush()
+        os.fsync(log.fileno())
+    return record
 
 
 class MissionCreate(BaseModel):
@@ -176,10 +244,22 @@ class MissionCreate(BaseModel):
     root_public_key: str
     actions: list[str] = Field(min_length=1)
     resources: list[str] = Field(min_length=1)
+    parameter_constraints: dict[str, Any] = Field(default_factory=dict)
     budget_limit: float = Field(gt=0)
     ttl_seconds: int = Field(default=1800, gt=0, le=86400)
     allow_external: bool = False
     can_delegate: bool = True
+
+
+class GroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    department: str = Field(min_length=1, max_length=120)
+    actions: list[str] = Field(min_length=1)
+    resources: list[str] = Field(min_length=1)
+    parameter_constraints: dict[str, Any] = Field(default_factory=dict)
+    budget_limit: float = Field(gt=0)
+    ttl_seconds: int = Field(default=3600, gt=0, le=86400)
+    members: list[str] = Field(default_factory=list)
 
 
 class DelegateRequest(BaseModel):
@@ -189,6 +269,7 @@ class DelegateRequest(BaseModel):
     parent_signature: str
     actions: list[str]
     resources: list[str]
+    parameter_constraints: dict[str, Any] = Field(default_factory=dict)
     budget_limit: float = Field(gt=0)
     ttl_seconds: int = Field(gt=0, le=86400)
     can_delegate: bool = False
@@ -227,18 +308,31 @@ class DemoAgentState(TypedDict, total=False):
     engine: str
 
 
-def mandate_payload(mission_id: str, agent: str, agent_public: str, parent_id: str | None, actions: list[str], resources: list[str], budget: float, expires: int, delegate: bool, external: bool) -> dict[str, Any]:
-    return {"mission_id": mission_id, "agent_id": agent, "agent_public_key": agent_public, "parent_grant_id": parent_id, "actions": sorted(set(actions)), "resources": sorted(set(resources)), "budget_limit": budget, "expires_at": expires, "can_delegate": delegate, "allow_external": external}
+def mandate_payload(mission_id: str, agent: str, agent_public: str, parent_id: str | None, actions: list[str], resources: list[str], constraints: dict[str, Any], budget: float, expires: int, delegate: bool, external: bool, zk_commitment: str) -> dict[str, Any]:
+    return {"mission_id": mission_id, "agent_id": agent, "agent_public_key": agent_public, "parent_grant_id": parent_id, "actions": sorted(set(actions)), "resources": sorted(set(resources)), "parameter_constraints": constraints, "budget_limit": budget, "expires_at": expires, "can_delegate": delegate, "allow_external": external, "zk_commitment": zk_commitment}
 
 
 def delegation_signing_payload(req: DelegateRequest, mission_id: str) -> dict[str, Any]:
-    return {"mission_id": mission_id, "parent_grant_id": req.parent_grant_id, "child_agent": req.child_agent, "child_public_key": req.child_public_key, "actions": sorted(set(req.actions)), "resources": sorted(set(req.resources)), "budget_limit": float(req.budget_limit), "ttl_seconds": req.ttl_seconds, "can_delegate": req.can_delegate}
+    return {"mission_id": mission_id, "parent_grant_id": req.parent_grant_id, "child_agent": req.child_agent, "child_public_key": req.child_public_key, "actions": sorted(set(req.actions)), "resources": sorted(set(req.resources)), "parameter_constraints": req.parameter_constraints, "budget_limit": float(req.budget_limit), "ttl_seconds": req.ttl_seconds, "can_delegate": req.can_delegate}
 
 
 @app.get("/health")
 def health():
     init_db()
-    return {"ok": True, "mode": "local", "database": "sqlite", "signing": "ed25519", "connectors": ["procurement.create_order", "records.share_local"], "external_connectors": False}
+    try:
+        zk_ready = zk_call("self-check", {}).get("setupReady") is True
+    except RuntimeError:
+        zk_ready = False
+    return {"ok": True, "mode": "local", "database": "sqlite", "signing": "ed25519", "delegation_proofs": "Groth16 ready" if zk_ready else "setup required", "audit_log": "JSONL", "connectors": ["procurement.create_order", "records.share_local"], "external_connectors": False}
+
+
+@app.get("/zk/status")
+def zk_status():
+    try:
+        ready = zk_call("self-check", {}).get("setupReady") is True
+    except RuntimeError:
+        ready = False
+    return {"ready": ready, "protocol": "Groth16/bn128", "circuit": "delegation-subset-v1", "setup": "local development only; not an audited production ceremony", "max_scope_entries": 8}
 
 
 @app.get("/keys/public")
@@ -254,31 +348,70 @@ def create_mission(req: MissionCreate):
             raise ValueError()
     except Exception:
         raise HTTPException(422, "root_public_key must be a base64url Ed25519 public key")
+    if len(set(req.actions)) > 8 or len(set(req.resources)) > 8 or len(req.parameter_constraints) > 8:
+        raise HTTPException(422, "ZK delegation supports up to 8 tools, resources, and exact parameter constraints per grant")
     now = int(time.time())
     mission_id, grant_id = str(uuid.uuid4()), str(uuid.uuid4())
     exp = now + req.ttl_seconds
-    mandate = mandate_payload(mission_id, req.root_agent, req.root_public_key, None, req.actions, req.resources, req.budget_limit, exp, req.can_delegate, req.allow_external)
+    nonce = secrets.token_hex(32)
+    try:
+        commitment = zk_call("commitment", zk_mandate(mission_id, req.root_public_key, req.actions, req.resources, req.parameter_constraints, req.budget_limit, exp, req.can_delegate, req.allow_external, nonce))["commitment"]
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    mandate = mandate_payload(mission_id, req.root_agent, req.root_public_key, None, req.actions, req.resources, req.parameter_constraints, req.budget_limit, exp, req.can_delegate, req.allow_external, commitment)
     signature = sign(mandate)
     with transaction(immediate=True) as db:
         db.execute("INSERT INTO missions(id,name,budget_limit,expires_at,created_at) VALUES(?,?,?,?,?)", (mission_id, req.name, req.budget_limit, exp, now))
-        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,actions,resources,budget_limit,expires_at,can_delegate,allow_external,mandate,signature) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (grant_id, mission_id, req.root_agent, req.root_public_key, json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), req.budget_limit, exp, int(req.can_delegate), int(req.allow_external), canonical(mandate).decode(), signature))
+        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,actions,resources,parameter_constraints,budget_limit,expires_at,can_delegate,allow_external,mandate,signature,zk_nonce,zk_commitment) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grant_id, mission_id, req.root_agent, req.root_public_key, json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), canonical(req.parameter_constraints).decode(), req.budget_limit, exp, int(req.can_delegate), int(req.allow_external), canonical(mandate).decode(), signature, nonce, commitment))
         append_event(db, {"type": "mission.created", "mission_id": mission_id, "grant_id": grant_id, "agent_id": req.root_agent, "mandate_hash": sha(canonical(mandate))})
     return {"mission_id": mission_id, "grant_id": grant_id, "mandate": mandate, "mandate_signature": signature, "signing_public_key": public_key()}
+
+
+@app.post("/groups")
+def create_group(req: GroupCreate):
+    init_db()
+    if len(set(req.actions)) > 8 or len(set(req.resources)) > 8 or len(req.parameter_constraints) > 8:
+        raise HTTPException(422, "ZK group policies support at most 8 tools, resources, and parameter restrictions")
+    group_id = str(uuid.uuid4())
+    group_public_key, _group_private_key = fresh_agent_key()
+    mission = create_mission(MissionCreate(name=req.name, root_agent=f"group:{group_id}", root_public_key=group_public_key, actions=req.actions, resources=req.resources, parameter_constraints=req.parameter_constraints, budget_limit=req.budget_limit, ttl_seconds=req.ttl_seconds, can_delegate=True))
+    with transaction(immediate=True) as db:
+        db.execute("INSERT INTO agent_groups(id,name,department,budget_limit,mission_id,grant_id,member_names,created_at) VALUES(?,?,?,?,?,?,?,?)", (group_id, req.name, req.department, req.budget_limit, mission["mission_id"], mission["grant_id"], canonical(req.members).decode(), int(time.time())))
+        append_event(db, {"type": "group.policy.created", "group_id": group_id, "mission_id": mission["mission_id"], "grant_id": mission["grant_id"], "department": req.department, "member_count": len(req.members), "member_credentials": "not_issued_in_mvp"})
+    return {"group_id": group_id, "mission_id": mission["mission_id"], "grant_id": mission["grant_id"], "mandate": mission["mandate"], "policy_status": "signed group-principal policy created", "member_credentials": "roster only; individual derived credentials are not implemented"}
+
+
+@app.get("/groups")
+def list_groups():
+    init_db()
+    with transaction() as db:
+        rows = [dict(row) for row in db.execute("SELECT g.id,g.name,g.department,g.budget_limit,g.mission_id,g.grant_id,g.member_names,g.created_at,m.budget_used,m.expires_at,m.revoked,gr.actions,gr.resources,gr.parameter_constraints,gr.can_delegate,gr.revoked AS grant_revoked,gr.zk_commitment FROM agent_groups g JOIN missions m ON m.id=g.mission_id JOIN grants gr ON gr.id=g.grant_id ORDER BY g.created_at DESC")]
+    for row in rows:
+        row["members"] = json.loads(row.pop("member_names"))
+        row["actions"] = json.loads(row["actions"])
+        row["resources"] = json.loads(row["resources"])
+        row["parameter_constraints"] = json.loads(row["parameter_constraints"])
+    return {"groups": rows, "credential_limit": "Roster only. Each member does not yet receive a separate group-derived cryptographic credential."}
 
 
 @app.post("/delegations")
 def delegate(req: DelegateRequest):
     init_db()
     now = int(time.time())
+    if len(set(req.actions)) > 8 or len(set(req.resources)) > 8 or len(req.parameter_constraints) > 8:
+        raise HTTPException(422, "ZK delegation supports up to 8 tools, resources, and exact parameter constraints per grant")
     with transaction(immediate=True) as db:
         parent = db.execute("SELECT * FROM grants WHERE id=?", (req.parent_grant_id,)).fetchone()
         if not parent:
             raise HTTPException(404, "parent grant not found")
         actions, resources = set(json.loads(parent["actions"])), set(json.loads(parent["resources"]))
+        parent_constraints = json.loads(parent["parameter_constraints"] or "{}")
         if parent["revoked"] or not parent["can_delegate"] or now >= parent["expires_at"]:
             raise HTTPException(403, "parent mandate is revoked, expired, or non-delegable")
         if not set(req.actions) <= actions or not set(req.resources) <= resources:
             raise HTTPException(403, "delegation expands parent scope")
+        if any(req.parameter_constraints.get(key) != value for key, value in parent_constraints.items()):
+            raise HTTPException(403, "delegation removes or changes a parent parameter restriction")
         if req.budget_limit > parent["budget_limit"] - parent["budget_used"] - parent["budget_reserved"]:
             raise HTTPException(403, "delegation exceeds remaining parent budget")
         claim = delegation_signing_payload(req, parent["mission_id"])
@@ -294,12 +427,37 @@ def delegate(req: DelegateRequest):
         if not mission or mission["revoked"] or now >= mission["expires_at"]:
             raise HTTPException(403, "mission is revoked or expired")
         child_id = str(uuid.uuid4())
-        mandate = mandate_payload(parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], req.actions, req.resources, req.budget_limit, exp, bool(req.can_delegate and parent["can_delegate"]), bool(parent["allow_external"]))
+        child_can_delegate = bool(req.can_delegate and parent["can_delegate"])
+        child_allow_external = bool(parent["allow_external"])
+        parent_nonce = parent["zk_nonce"] or secrets.token_hex(32)
+        parent_commitment = parent["zk_commitment"]
+        if not parent_commitment:
+            try:
+                parent_commitment = zk_call("commitment", zk_mandate(parent["mission_id"], parent["agent_public_key"], actions, resources, parent_constraints, parent["budget_limit"], parent["expires_at"], bool(parent["can_delegate"]), bool(parent["allow_external"]), parent_nonce))["commitment"]
+            except RuntimeError as exc:
+                raise HTTPException(503, str(exc)) from exc
+        child_nonce = secrets.token_hex(32)
+        try:
+            proof = zk_call("prove", {
+                "parent": zk_mandate(parent["mission_id"], parent["agent_public_key"], list(actions), list(resources), parent_constraints, parent["budget_limit"], parent["expires_at"], bool(parent["can_delegate"]), bool(parent["allow_external"]), parent_nonce),
+                "child": zk_mandate(parent["mission_id"], req.child_public_key, req.actions, req.resources, req.parameter_constraints, req.budget_limit, exp, child_can_delegate, child_allow_external, child_nonce),
+            }, timeout=300)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if not proof.get("verified") or proof.get("parentCommitment") != parent_commitment:
+            raise HTTPException(503, "delegation proof failed circuit verification; grant was not issued")
+        if not verify_zk_proof_independently(proof):
+            raise HTTPException(503, "independent delegation proof verification failed; grant was not issued")
+        mandate = mandate_payload(parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], req.actions, req.resources, req.parameter_constraints, req.budget_limit, exp, child_can_delegate, child_allow_external, proof["childCommitment"])
         signature = sign(mandate)
-        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,parent_id,actions,resources,budget_limit,expires_at,can_delegate,allow_external,mandate,signature) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (child_id, parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), req.budget_limit, exp, int(mandate["can_delegate"]), parent["allow_external"], canonical(mandate).decode(), signature))
+        if parent["zk_commitment"] is None:
+            parent_mandate = json.loads(parent["mandate"])
+            parent_mandate.update({"parameter_constraints": parent_constraints, "zk_commitment": parent_commitment})
+            db.execute("UPDATE grants SET mandate=?,signature=?,zk_nonce=?,zk_commitment=? WHERE id=?", (canonical(parent_mandate).decode(), sign(parent_mandate), parent_nonce, parent_commitment, parent["id"]))
+        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,parent_id,actions,resources,parameter_constraints,budget_limit,expires_at,can_delegate,allow_external,mandate,signature,zk_nonce,zk_commitment,zk_proof,zk_public_signals,zk_proof_sha256,zk_verified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (child_id, parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), canonical(req.parameter_constraints).decode(), req.budget_limit, exp, int(mandate["can_delegate"]), parent["allow_external"], canonical(mandate).decode(), signature, child_nonce, proof["childCommitment"], canonical(proof["proof"]).decode(), canonical(proof["publicSignals"]).decode(), proof["proofSha256"], 1))
         db.execute("UPDATE grants SET budget_reserved=budget_reserved+? WHERE id=?", (req.budget_limit, parent["id"]))
-        append_event(db, {"type": "delegation.issued", "mission_id": parent["mission_id"], "parent_grant_id": parent["id"], "child_grant_id": child_id, "agent_id": req.child_agent, "mandate_hash": sha(canonical(mandate))})
-    return {"grant_id": child_id, "mandate": mandate, "mandate_signature": signature, "signing_public_key": public_key(), "zk_status": "not_implemented; subset is checked directly by the local controller"}
+        append_event(db, {"type": "delegation.issued", "mission_id": parent["mission_id"], "parent_grant_id": parent["id"], "child_grant_id": child_id, "agent_id": req.child_agent, "mandate_hash": sha(canonical(mandate)), "zk_protocol": proof["protocol"], "zk_proof_sha256": proof["proofSha256"]})
+    return {"grant_id": child_id, "mandate": mandate, "mandate_signature": signature, "signing_public_key": public_key(), "zk_status": "verified", "zk_proof": proof, "zk_verifier": "separate snarkjs verification process", "setup": proof["setup"]}
 
 
 @app.post("/approvals")
@@ -334,6 +492,38 @@ def signed_action(private: Ed25519PrivateKey, **fields: Any) -> ActionRequest:
     return unsigned.model_copy(update={"agent_signature": signature})
 
 
+def add_alert(db: sqlite3.Connection, code: str, severity: str, mission_id: str | None, grant_id: str | None, request_id: str | None, reason: str) -> dict[str, Any]:
+    alert_id, created_at = str(uuid.uuid4()), int(time.time())
+    db.execute("INSERT INTO alerts(id,code,severity,mission_id,grant_id,request_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?)", (alert_id, code, severity, mission_id, grant_id, request_id, reason, created_at))
+    append_event(db, {"type": "alert.raised", "alert_id": alert_id, "code": code, "severity": severity, "mission_id": mission_id, "grant_id": grant_id, "request_id": request_id, "reason": reason})
+    return {"id": alert_id, "code": code, "severity": severity, "mission_id": mission_id, "grant_id": grant_id, "request_id": request_id, "reason": reason, "created_at": created_at, "resolved_at": None}
+
+
+def alert_code(reason: str) -> tuple[str, str]:
+    lowered = reason.lower()
+    if "signature is invalid" in lowered:
+        return "CRYPTO-SIGNATURE", "critical"
+    if "already used" in lowered or "replay" in lowered:
+        return "CRYPTO-REPLAY", "critical"
+    if "outside grant scope" in lowered or "no connector registered" in lowered:
+        return "ASI02-TOOL-MISUSE", "high"
+    if "budget" in lowered:
+        return "ASI03-PRIVILEGE-ABUSE", "high"
+    if "quantitative limit" in lowered or "max_amount" in lowered or "max_transaction_eur" in lowered:
+        return "ASI03-PRIVILEGE-ABUSE", "high"
+    return "POLICY-DENY", "medium"
+
+
+def record_action_denial(db: sqlite3.Connection, req: "ActionRequest", reason: str, now: int) -> None:
+    code, severity = alert_code(reason)
+    add_alert(db, code, severity, req.mission_id, req.grant_id, req.request_id, reason)
+    recent = db.execute("SELECT COUNT(*) AS n FROM events WHERE created_at>=? AND json_extract(body,'$.grant_id')=? AND json_extract(body,'$.decision')='block' AND json_extract(body,'$.type')='action.decision'", (now - 60, req.grant_id)).fetchone()["n"]
+    if recent == 3:
+        db.execute("WITH RECURSIVE grant_tree(id) AS (SELECT id FROM grants WHERE id=? UNION ALL SELECT g.id FROM grants g JOIN grant_tree p ON g.parent_id=p.id) UPDATE grants SET revoked=1 WHERE id IN (SELECT id FROM grant_tree)", (req.grant_id,))
+        append_event(db, {"type": "grant.auto_revoked", "grant_id": req.grant_id, "mission_id": req.mission_id, "trigger": "3 denied actions in 60 seconds", "affected_descendants": True})
+        add_alert(db, "AUTO-KILL-SWITCH", "critical", req.mission_id, req.grant_id, req.request_id, "Grant tree revoked after 3 denied actions in 60 seconds")
+
+
 @app.post("/actions/hash")
 def preview_action_hash(req: ActionRequest):
     return {"parameter_hash": action_digest(req), "note": "This binds an approval to the exact declared parameters; the payload itself is not stored in the journal."}
@@ -348,6 +538,8 @@ def protected_action(req: ActionRequest):
     reason = "mandate and policies permit this local connector"
     with transaction(immediate=True) as db:
         if db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.request_id')=?", (req.request_id,)).fetchone():
+            append_event(db, {"type": "action.decision", "request_id": req.request_id, "mission_id": req.mission_id, "grant_id": req.grant_id, "agent_id": req.agent_id, "tool": req.tool, "decision": "block", "reason": "request_id already used", "attempt": "replay"})
+            record_action_denial(db, req, "request_id already used", now)
             raise HTTPException(409, "request_id already used")
         mission = db.execute("SELECT * FROM missions WHERE id=?", (req.mission_id,)).fetchone()
         grant = db.execute("SELECT * FROM grants WHERE id=? AND mission_id=?", (req.grant_id, req.mission_id)).fetchone()
@@ -363,6 +555,11 @@ def protected_action(req: ActionRequest):
             decision, reason = "block", "agent request signature is invalid"
         elif req.tool not in json.loads(grant["actions"]) or req.resource not in json.loads(grant["resources"]):
             decision, reason = "block", "tool or resource outside grant scope"
+        elif any(
+            (Decimal(str(req.amount)) > Decimal(str(value)) if key in {"max_amount", "max_transaction_eur"} else req.payload.get(key) != value)
+            for key, value in json.loads(grant["parameter_constraints"] or "{}").items()
+        ):
+            decision, reason = "block", "request exceeds a quantitative limit or violates a mandate parameter restriction"
         elif req.amount > 0 and (mission["budget_used"] + req.amount > mission["budget_limit"] or grant["budget_used"] + grant["budget_reserved"] + req.amount > grant["budget_limit"]):
             decision, reason = "block", "cumulative mission or grant budget exceeded"
         elif req.data_label == "confidential" and req.destination and req.destination not in {"internal", "records.local", "procurement.local"}:
@@ -385,6 +582,8 @@ def protected_action(req: ActionRequest):
             db.execute("UPDATE grants SET budget_used=budget_used+? WHERE id=?", (req.amount, req.grant_id))
         # The decision is committed durably before the connector is invoked below.
         event = append_event(db, {"type": "action.decision", "request_id": req.request_id, "mission_id": req.mission_id, "grant_id": req.grant_id, "agent_id": req.agent_id, "tool": req.tool, "resource_commitment": private_fingerprint(req.resource), "data_label": req.data_label, "destination_class": "external" if (req.destination or "").startswith("external:") else ("internal" if req.destination else "unspecified"), "destination_commitment": private_fingerprint(req.destination), "parameter_commitment": digest, "decision": decision, "reason": reason, "amount": req.amount})
+        if decision == "block":
+            record_action_denial(db, req, reason, now)
     if decision == "block":
         receipt_payload = {"request_id": req.request_id, "decision": decision, "reason": reason, "event_hash": event["hash"], "observed_at": int(time.time())}
         return {"decision": decision, "reason": reason, "receipt": {**receipt_payload, "signature": sign(receipt_payload)}}
@@ -416,17 +615,76 @@ def revoke_mission(mission_id: str):
     return {"mission_id": mission_id, "revoked": True, "future_actions_blocked": True, "event_hash": event["hash"]}
 
 
+@app.post("/grants/{grant_id}/revoke")
+def revoke_grant(grant_id: str):
+    with transaction(immediate=True) as db:
+        grant = db.execute("SELECT mission_id FROM grants WHERE id=?", (grant_id,)).fetchone()
+        if not grant:
+            raise HTTPException(404, "grant not found")
+        db.execute("WITH RECURSIVE grant_tree(id) AS (SELECT id FROM grants WHERE id=? UNION ALL SELECT g.id FROM grants g JOIN grant_tree p ON g.parent_id=p.id) UPDATE grants SET revoked=1 WHERE id IN (SELECT id FROM grant_tree)", (grant_id,))
+        event = append_event(db, {"type": "grant.manually_revoked", "grant_id": grant_id, "mission_id": grant["mission_id"], "affected_descendants": True})
+    return {"grant_id": grant_id, "revoked": True, "future_actions_blocked": True, "event_hash": event["hash"]}
+
+
 @app.get("/missions")
 def list_missions():
     init_db()
     with transaction() as db:
         missions = [dict(row) for row in db.execute("SELECT id,name,budget_limit,budget_used,expires_at,revoked,created_at FROM missions ORDER BY created_at DESC")]
-        grants = [dict(row) for row in db.execute("SELECT id,mission_id,agent_id,parent_id,actions,resources,budget_limit,budget_used,budget_reserved,expires_at,can_delegate,revoked FROM grants ORDER BY rowid")]
+        grants = [dict(row) for row in db.execute("SELECT id,mission_id,agent_id,parent_id,actions,resources,parameter_constraints,budget_limit,budget_used,budget_reserved,expires_at,can_delegate,allow_external,revoked,zk_commitment,zk_proof_sha256,zk_verified FROM grants ORDER BY rowid")]
         artifacts = [dict(row) for row in db.execute("SELECT id,mission_id,request_id,tool,summary,created_at FROM artifacts ORDER BY created_at DESC")]
     for grant in grants:
         grant["actions"] = json.loads(grant["actions"])
         grant["resources"] = json.loads(grant["resources"])
+        grant["parameter_constraints"] = json.loads(grant["parameter_constraints"] or "{}")
+        grant["status"] = "revoked" if grant["revoked"] else ("expired" if int(time.time()) >= grant["expires_at"] else "active")
     return {"missions": missions, "grants": grants, "artifacts": artifacts}
+
+
+@app.get("/alerts")
+def list_alerts():
+    init_db()
+    with transaction() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 500")]
+    return {"alerts": rows, "auto_revocation": "3 denied actions for the same grant within 60 seconds revoke that grant and its descendants"}
+
+
+@app.post("/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: str):
+    with transaction(immediate=True) as db:
+        row = db.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "alert not found")
+        resolved_at = int(time.time())
+        db.execute("UPDATE alerts SET resolved_at=? WHERE id=?", (resolved_at, alert_id))
+        append_event(db, {"type": "alert.resolved", "alert_id": alert_id, "grant_id": row["grant_id"], "mission_id": row["mission_id"]})
+    return {"alert_id": alert_id, "resolved_at": resolved_at}
+
+
+@app.get("/journal/jsonl")
+def export_jsonl():
+    init_db()
+    body = AUDIT_LOG_PATH.read_text("utf-8") if AUDIT_LOG_PATH.exists() else ""
+    return Response(content=body, media_type="application/x-ndjson", headers={"Content-Disposition": "attachment; filename=agentsafe-audit.jsonl"})
+
+
+@app.get("/grants/{grant_id}/zk-proof/verify")
+def verify_grant_proof(grant_id: str):
+    init_db()
+    with transaction() as db:
+        grant = db.execute("SELECT parent_id,mission_id,zk_commitment,zk_proof,zk_public_signals,zk_proof_sha256 FROM grants WHERE id=?", (grant_id,)).fetchone()
+        parent = db.execute("SELECT zk_commitment FROM grants WHERE id=?", (grant["parent_id"],)).fetchone() if grant and grant["parent_id"] else None
+    if not grant:
+        raise HTTPException(404, "grant not found")
+    if not grant["parent_id"] or not grant["zk_proof"] or not grant["zk_public_signals"]:
+        raise HTTPException(409, "this grant has no stored delegation proof")
+    payload = {"proof": json.loads(grant["zk_proof"]), "publicSignals": json.loads(grant["zk_public_signals"])}
+    # A mathematically valid proof is not enough: bind its public commitments to
+    # the parent and child grants currently stored by this controller.
+    commitments_match = bool(parent and parent["zk_commitment"] and grant["zk_commitment"] and
+                             payload["publicSignals"][:2] == [parent["zk_commitment"], grant["zk_commitment"]])
+    valid = commitments_match and verify_zk_proof_independently(payload)
+    return {"valid": valid, "verifier": "separate snarkjs verifier process", "protocol": "Groth16/bn128", "circuit": "delegation-subset-v1", "proof_sha256": grant["zk_proof_sha256"]}
 
 
 def verify_journal() -> dict[str, Any]:
@@ -487,7 +745,7 @@ def run_demo():
 
     def controller_gate(state: DemoAgentState) -> DemoAgentState:
         with transaction(immediate=True) as db:
-            append_event(db, {"type": "agent.graph.trace", "mission_id": state["mission"]["mission_id"], "runtime": "LangGraph StateGraph", "steps": ["agent_a_delegate", "agent_b_propose", "controller_policy_gate"], "scenario_source": "deterministic local test fixture"})
+            append_event(db, {"type": "agent.graph.trace", "mission_id": state["mission"]["mission_id"], "runtime": "LangGraph StateGraph", "steps": ["agent_a_delegate", "agent_b_propose", "controller_policy_gate"], "scenario_source": "deterministic local test fixture", "delegation_zk": "Groth16 proof generated and independently verified"})
         allowed, blocked_data, blocked_approval = [protected_action(proposal) for proposal in state["proposals"]]
         return {"results": {"internal_confidential_transfer": allowed["decision"], "external_confidential_transfer": blocked_data["decision"], "missing_approval": blocked_approval["decision"]}, "details": {"external_confidential_transfer": blocked_data["reason"], "missing_approval": blocked_approval["reason"]}, "pending_order": state["proposals"][2].model_dump()}
 
@@ -501,7 +759,7 @@ def run_demo():
     graph.add_edge("controller_policy_gate", END)
     result = graph.compile().invoke({})
     order = ActionRequest.model_validate(result["pending_order"])
-    return {"mission": result["mission"]["mission_id"], "delegation": result["child"]["grant_id"], "results": result["results"], "details": result["details"], "pending_order": result["pending_order"], "pending_order_hash": action_digest(order), "agent_runtime": "LangGraph StateGraph · Agent A delegation → Agent B proposals → AgentSafe policy gate", "model": "Deterministic synthetic scenario; Mistral is not called by this test harness", "journal": verify_journal(), "synthetic_or_live": "The missions, agent identities, data and connector effects are synthetic/local demo records. All proposed actions are signature-checked by the controller; no external tools are called."}
+    return {"mission": result["mission"]["mission_id"], "delegation": result["child"]["grant_id"], "delegation_zk_status": result["child"]["zk_status"], "delegation_zk_proof": result["child"]["zk_proof"], "results": result["results"], "details": result["details"], "pending_order": result["pending_order"], "pending_order_hash": action_digest(order), "agent_runtime": "LangGraph StateGraph · Agent A delegation → Agent B proposals → AgentSafe policy gate", "model": "Deterministic synthetic scenario; Mistral is not called by this test harness", "journal": verify_journal(), "synthetic_or_live": "The missions, agent identities, data and connector effects are synthetic/local demo records. A Groth16 delegation proof is generated and independently verified; no external tools are called."}
 
 
 @app.post("/demo/finish")
