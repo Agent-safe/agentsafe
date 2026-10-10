@@ -109,29 +109,72 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [activeNav, setActiveNav] = useState("Overview");
 
-  const blockedCount = useMemo(() => events.filter((event) => event.decision === "blocked").length, [events]);
+  const [liveEvents, setLiveEvents] = useState<ToolEvent[]>([]);
+  const [activeNode, setActiveNode] = useState("");
+  const displayEvents = isSimulating ? liveEvents : events;
+  const displayRecord = isSimulating ? null : record;
+  const blockedCount = useMemo(() => displayEvents.filter((event) => event.decision === "blocked").length, [displayEvents]);
 
   async function runScenario(nextScenario: "attack" | "safe") {
     setIsSimulating(true);
-    setNotice("Running the synthetic scenario through the policy gate…");
+    setLiveEvents([]);
+    setActiveNode("read_context");
+    setNotice("LangGraph started · reading synthetic context…");
     try {
       const response = await fetch("/api/simulate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scenario: nextScenario }),
       });
-      if (!response.ok) throw new Error("simulation-failed");
-      const result = await response.json() as { events?: ToolEvent[]; artifacts?: DraftArtifact[]; engine?: "mistral" | "replay" };
-      if (!Array.isArray(result.events) || (result.engine !== "mistral" && result.engine !== "replay")) throw new Error("invalid-simulation");
-      const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
-      const nextRecord = createAuditRecord(result.events, result.engine, artifacts);
+      if (!response.ok || !response.body) throw new Error("simulation-failed");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed: { events: ToolEvent[]; artifacts: DraftArtifact[]; engine: "mistral" | "replay" } | null = null;
+      const consume = (line: string) => {
+        if (!line.trim()) return;
+        const update = JSON.parse(line) as { type: "step" | "complete" | "error"; node?: string; nextNode?: string | null; events?: ToolEvent[]; artifacts?: DraftArtifact[]; engine?: "mistral" | "replay"; message?: string };
+        if (update.type === "error") throw new Error(update.message ?? "simulation-failed");
+        if (update.type === "step") {
+          setActiveNode(update.nextNode ?? "");
+          setLiveEvents((current) => current.concat(update.events ?? []));
+          setNotice(`LangGraph running · ${nodeLabel(update.nextNode ?? update.node ?? "")}`);
+        }
+        if (update.type === "complete" && Array.isArray(update.events) && (update.engine === "mistral" || update.engine === "replay")) {
+          completed = { events: update.events, artifacts: update.artifacts ?? [], engine: update.engine };
+        }
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        lines.forEach(consume);
+        if (done) break;
+      }
+      if (buffer.trim()) consume(buffer);
+      const result = completed as { events: ToolEvent[]; artifacts: DraftArtifact[]; engine: "mistral" | "replay" } | null;
+      if (!result) throw new Error("invalid-simulation");
+      const nextRecord = createAuditRecord(result.events, result.engine, result.artifacts);
       saveAuditRecord(nextRecord);
-      setNotice(`${nextScenario === "attack" ? "Attack" : "Safe"} simulation completed via ${result.engine === "mistral" ? "Mistral AI" : "fixed replay"}. Local evidence commitment is ready.`);
+      setNotice(`${nextScenario === "attack" ? "Attack" : "Safe"} LangGraph run completed via ${result.engine === "mistral" ? "Mistral AI" : "fixed replay"}. Local evidence commitment is ready.`);
     } catch {
       setNotice("The simulation service could not be reached; no run was recorded. Check your connection and retry.");
     } finally {
       setIsSimulating(false);
+      setActiveNode("");
     }
+  }
+
+  function nodeLabel(node: string) {
+    const labels: Record<string, string> = {
+      read_context: "reading synthetic context",
+      propose_action: "getting an action proposal (Mistral or local replay)",
+      policy_gate: "checking the proposal against policy",
+      create_local_draft: "creating a local draft",
+      stop_action: "stopping the action / requesting review",
+    };
+    return labels[node] ?? node;
   }
 
   async function connectWallet() {
@@ -229,7 +272,7 @@ export default function Home() {
       <section className="main-area" id="overview">
         <header className="topbar">
           <div className="breadcrumbs"><span>AgentSafe</span><b>/</b><strong>{activeNav}</strong></div>
-          <div className="top-actions"><span className="demo-chip">SYNTHETIC RUNNER</span><button className="help-button" onClick={() => setNotice("Run a synthetic scenario, inspect the policy decision, then anchor its salted hash on Fuji after the contract is deployed.")}>How it works</button></div>
+          <div className="top-actions"><span className="demo-chip">LANGGRAPH · SYNTHETIC AGENT</span><button className="help-button" onClick={() => setNotice("LangGraph runs context lookup → Mistral action proposal → local policy gate → local draft or stop. All scenario data is synthetic; no email or external tool is connected.")}>How it works</button></div>
         </header>
 
         <div className="page-content">
@@ -245,25 +288,25 @@ export default function Home() {
           </section>
 
           <div className="metrics-grid">
-            <article className="metric-card"><div className="metric-top"><span>Tool calls in this run</span><span className="metric-icon blue"><Icon name="activity" size={17} /></span></div><div className="metric-value">{events.length}</div><div className="metric-foot"><span>{record ? "Synthetic trace" : "No run yet"}</span><span>{record ? "current run" : "run a scenario to begin"}</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Tool calls in this run</span><span className="metric-icon blue"><Icon name="activity" size={17} /></span></div><div className="metric-value">{displayEvents.length}</div><div className="metric-foot"><span>{isSimulating ? "Live LangGraph trace" : record ? "Synthetic trace" : "No run yet"}</span><span>{isSimulating ? "updating now" : record ? "current run" : "run a scenario to begin"}</span></div></article>
             <article className="metric-card"><div className="metric-top"><span>Blocked</span><span className="metric-icon red"><Icon name="shield" size={17} /></span></div><div className="metric-value">{blockedCount}</div><div className="metric-foot"><span>Policy result</span><span>current run</span></div></article>
-            <article className="metric-card"><div className="metric-top"><span>Needs review</span><span className="metric-icon amber"><Icon name="clock" size={17} /></span></div><div className="metric-value">{events.filter((event) => event.decision === "review").length}</div><div className="metric-foot"><span>Human review decisions</span><span>current run</span></div></article>
-            <article className="metric-card"><div className="metric-top"><span>Evidence</span><span className="metric-icon green"><Icon name="lock" size={16} /></span></div><div className="metric-value">{record?.txHash ? "On-chain" : record ? "Local" : "None"}</div><div className="metric-foot"><span>{record?.txHash ? "Confirmed on Fuji" : "Not on-chain"}</span><span>salted hash</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Needs review</span><span className="metric-icon amber"><Icon name="clock" size={17} /></span></div><div className="metric-value">{displayEvents.filter((event) => event.decision === "review").length}</div><div className="metric-foot"><span>Human review decisions</span><span>current run</span></div></article>
+            <article className="metric-card"><div className="metric-top"><span>Evidence</span><span className="metric-icon green"><Icon name="lock" size={16} /></span></div><div className="metric-value">{isSimulating ? "Running" : displayRecord?.txHash ? "On-chain" : displayRecord ? "Local" : "None"}</div><div className="metric-foot"><span>{isSimulating ? "Not committed yet" : displayRecord?.txHash ? "Confirmed on Fuji" : "Not on-chain"}</span><span>salted hash</span></div></article>
           </div>
 
           <div className="content-grid">
             <section className="panel run-panel" id="agent-run">
-              <div className="panel-header"><div><div className="section-kicker">SYNTHETIC SCENARIO</div><h2>Current run</h2><small className="section-kicker">{record ? record.engine === "mistral" ? "Mistral proposal · local policy gate" : "Fixed replay · local policy gate" : "No agent or external tools are connected"}</small></div></div>
-              {record ? <div className="run-meta"><div className="agent-avatar"><Icon name="activity" size={17} /></div><div className="agent-details"><b>Synthetic support flow</b><small>Run ID <code>{record.runId ?? "saved-local-run"}</code><span className="meta-divider">·</span>{new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(record.createdAt))}</small></div><span className="contained-chip"><span />{blockedCount ? "Blocked by policy" : "Completed"}</span></div> : <div className="empty-state"><b>No run yet</b><span>Choose a synthetic scenario above. It uses no real agent, account or customer data.</span></div>}
-              <div className="timeline-heading"><span>TOOL CALL TIMELINE</span><span>{events.length} events</span></div>
+              <div className="panel-header"><div><div className="section-kicker">LANGGRAPH · SYNTHETIC SCENARIO</div><h2>Current run</h2><small className="section-kicker">{record ? record.engine === "mistral" ? "LangGraph · Mistral proposal · local policy gate" : "LangGraph · fixed replay · local policy gate" : "One demo agent · no external tools connected"}</small></div></div>
+              {isSimulating ? <div className="run-meta"><div className="agent-avatar running-avatar"><Icon name="activity" size={17} /></div><div className="agent-details"><b>LangGraph is running</b><small>Active node: <code>{nodeLabel(activeNode)}</code></small></div><span className="contained-chip running-chip"><span />Running</span></div> : record ? <div className="run-meta"><div className="agent-avatar"><Icon name="activity" size={17} /></div><div className="agent-details"><b>Synthetic support flow</b><small>Run ID <code>{record.runId ?? "saved-local-run"}</code><span className="meta-divider">·</span>{new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(record.createdAt))}</small></div><span className="contained-chip"><span />{blockedCount ? "Blocked by policy" : "Completed"}</span></div> : <div className="empty-state"><b>No run yet</b><span>Choose a synthetic scenario above. It uses no real agent, account or customer data.</span></div>}
+              <div className="timeline-heading"><span>LANGGRAPH NODE TRACE</span><span>{displayEvents.length} events{isSimulating ? " · live" : ""}</span></div>
               <div className="timeline">
-                {events.length === 0 ? <div className="timeline-empty">Run an attack or safe scenario to create a trace.</div> : events.map((event, index) => <div className={`timeline-row ${event.decision}`} key={`${event.time}-${index}`}>
+                {displayEvents.length === 0 ? <div className="timeline-empty">{isSimulating ? `Running node: ${nodeLabel(activeNode)}…` : "Run an attack or safe scenario to create a trace."}</div> : displayEvents.map((event, index) => <div className={`timeline-row ${event.decision}`} key={`${event.time}-${index}`}>
                   <div className="timeline-rail"><span className="timeline-marker">{event.decision === "allowed" ? <Icon name="check" size={12} /> : event.decision === "blocked" ? "!" : <Icon name="clock" size={12} />}</span>{index < events.length - 1 && <i />}</div>
                   <div className="timeline-event"><div className="event-top"><b>{event.tool}</b><time>{event.time}</time></div><p>{event.detail}</p></div>
                   <span className={`event-tag ${event.decision}`}>{event.tag}</span>
                 </div>)}
               </div>
-              {record?.artifacts?.map((artifact, index) => <div className="draft-artifact" key={`${artifact.kind}-${index}`}><div className="draft-label">LOCAL DRAFT · NOT SENT</div><b>{artifact.title}</b><p>{artifact.body}</p></div>)}
+              {!isSimulating && record?.artifacts?.map((artifact, index) => <div className="draft-artifact" key={`${artifact.kind}-${index}`}><div className="draft-label">LOCAL DRAFT · NOT SENT</div><b>{artifact.title}</b><p>{artifact.body}</p></div>)}
               <div className="run-footer"><span><span className="mini-lock"><Icon name="lock" size={12} /></span> Raw events stay in this browser</span>{record && <a href="#events" onClick={() => setActiveNav("Run events")}>View run events <Icon name="arrow" size={14} /></a>}</div>
             </section>
 
@@ -271,9 +314,9 @@ export default function Home() {
               <section className="panel evidence-panel" id="evidence">
                 <div className="panel-header"><div><div className="section-kicker">AUDIT EVIDENCE</div><h2>Proof of integrity</h2></div><span className="evidence-emblem"><Icon name="lock" size={17} /></span></div>
                 <p className="evidence-copy">Anchor a salted fingerprint of this run. Event details never leave your device.</p>
-                <div className="proof-box"><div className="proof-label"><span>RUN COMMITMENT</span><span className="proof-ready"><i />{record?.txHash ? "CONFIRMED" : record ? "READY" : "NOT CREATED"}</span></div><code>{record?.root ?? "Run a simulation to create a proof"}</code><button className="copy-button" onClick={async () => { if (record) { await navigator.clipboard.writeText(record.root); setNotice("Commitment copied."); } }} aria-label="Copy commitment" disabled={!record}>⧉</button></div>
-                {record?.txHash ? <a className="tx-link" href={`https://build.avax.network/explorer/fuji/c-chain/tx/${record.txHash}`} target="_blank" rel="noreferrer"><span className="tx-check"><Icon name="check" size={12} /></span>View confirmed transaction <Icon name="external" size={12} /></a> : <div className="network-note"><span className="network-symbol">A</span><span><b>Avalanche Fuji</b><small>Testnet · Chain ID 43113</small></span><span className="network-online"><i />TESTNET</span></div>}
-                <button className="button button-anchor" onClick={anchorEvidence} disabled={isAnchoring || Boolean(record?.txHash) || !CONTRACT_ADDRESS}><Icon name={isAnchoring ? "clock" : "chain"} size={16} />{isAnchoring ? "Waiting for confirmation…" : record?.txHash ? "Evidence anchored" : CONTRACT_ADDRESS ? "Anchor proof to Fuji" : "Fuji contract not configured"}</button>
+                <div className="proof-box"><div className="proof-label"><span>RUN COMMITMENT</span><span className="proof-ready"><i />{isSimulating ? "IN PROGRESS" : displayRecord?.txHash ? "CONFIRMED" : displayRecord ? "READY" : "NOT CREATED"}</span></div><code>{isSimulating ? `Waiting for ${nodeLabel(activeNode)} to finish…` : displayRecord?.root ?? "Run a simulation to create a proof"}</code><button className="copy-button" onClick={async () => { if (displayRecord) { await navigator.clipboard.writeText(displayRecord.root); setNotice("Commitment copied."); } }} aria-label="Copy commitment" disabled={!displayRecord}>⧉</button></div>
+                {displayRecord?.txHash ? <a className="tx-link" href={`https://build.avax.network/explorer/fuji/c-chain/tx/${displayRecord.txHash}`} target="_blank" rel="noreferrer"><span className="tx-check"><Icon name="check" size={12} /></span>View confirmed transaction <Icon name="external" size={12} /></a> : <div className="network-note"><span className="network-symbol">A</span><span><b>Avalanche Fuji</b><small>Testnet · Chain ID 43113</small></span><span className="network-online"><i />TESTNET</span></div>}
+                <button className="button button-anchor" onClick={anchorEvidence} disabled={isSimulating || isAnchoring || Boolean(displayRecord?.txHash) || !CONTRACT_ADDRESS}><Icon name={isAnchoring ? "clock" : "chain"} size={16} />{isSimulating ? "Waiting for run to finish…" : isAnchoring ? "Waiting for confirmation…" : displayRecord?.txHash ? "Evidence anchored" : CONTRACT_ADDRESS ? "Anchor proof to Fuji" : "Fuji contract not configured"}</button>
                 {!CONTRACT_ADDRESS && <p className="config-hint">The evidence hash is local only until the Fuji contract is deployed and configured.</p>}
               </section>
 

@@ -146,6 +146,10 @@ h1 { margin: 10px 0 5px; font-size: 26px; line-height: 1.1; font-weight: 650; le
 .empty-state { display: grid; gap: 6px; margin: 0 16px; padding: 16px; border: 1px dashed #334150; border-radius: 7px; color: #8f9dac; font-size: 10px; line-height: 1.5; }
 .empty-state b { color: #dbe4ee; font-size: 11px; }
 .timeline-row { display: grid; grid-template-columns: 17px minmax(0,1fr) auto; gap: 10px; min-height: 56px; }
+.running-avatar { color: #75b8ff; animation: agent-pulse 1.2s ease-in-out infinite; }
+.running-chip { color: #84c4ff; }
+.running-chip > span { background: #58b3ff; animation: agent-pulse 1.2s ease-in-out infinite; }
+@keyframes agent-pulse { 50% { opacity: .45; } }
 .timeline-rail { position: relative; display: flex; justify-content: center; }
 .timeline-marker { z-index: 1; display: grid; place-items: center; width: 17px; height: 17px; margin-top: 10px; border: 1px solid #31533f; border-radius: 50%; background: #15271e; color: #68d3a4; }
 .timeline-rail > i { position: absolute; top: 27px; bottom: -2px; width: 1px; background: #29353f; }
