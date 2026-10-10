@@ -1,48 +1,52 @@
 # AgentSafe
 
-AgentSafe is a hackathon proof of concept for supervising AI-agent tool calls. It shows a synthetic safe run and a synthetic exfiltration attempt, demonstrates allow/block/review decisions, and commits a salted fingerprint of the evidence to Avalanche Fuji.
+AgentSafe is a local control layer for AI agents. An agent signs a proposed tool call; the controller checks its signed mandate, delegation scope, remaining budgets, data destination, approval requirements, expiry, and revocation state. Only an allowed request reaches a registered connector. The controller records the decision before execution and signs a receipt after it observes the result.
 
-## What the demo proves
+## Run the working local prototype
 
-- A tool call to an unapproved destination can be blocked and escalated for analyst review.
-- The browser can create a salted commitment over an event record and verify its timestamp on Fuji.
-- Raw event details stay in the browser. The contract accepts only a `bytes32` root; it does not receive prompts, arguments, user data, or the salt.
-
-The demo defines one synthetic support agent workflow as a compiled LangGraph `StateGraph` in `app/api/simulate/agent.ts`. Its explicit nodes read a synthetic ticket and local knowledge fixture, request a Mistral tool-call proposal (or use a deterministic replay), apply a policy gate, then either create a local synthetic draft or stop/route for review. The graph has no email sender or external business tools. Runs and drafts are saved in the browser. This is not a multi-agent system or a production agent gateway: it does not intercept an independently running agent, connect to external tools, or claim to detect all prompt injection or agent abuse.
-
-To enable Mistral locally, put `MISTRAL_API_KEY` in `.env.local`. It is read only by `/api/simulate` on the server and must never use a `NEXT_PUBLIC_` prefix. Vercel production and preview deployments use the project-scoped sensitive environment variable.
-
-## Run the dashboard
+Requirements: Python 3.10+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-npm install
-npm run dev
+cd controller
+uv sync
+uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-Open the local URL shown by Next.js. Use **Run attack simulation** or **Run safe simulation** to create a local audit record. The interface remains useful without a deployed contract, but anchoring stays disabled until `NEXT_PUBLIC_AUDIT_ANCHOR_ADDRESS` points to a Fuji deployment.
+Open <http://127.0.0.1:8765>. Click **Start policy demo**, inspect the real allow/block decisions, then explicitly click **Approve exact $70 local demo order**. The approved operation creates a local SQLite artifact; it does not contact a supplier or move money. The page shows the root-to-child grant graph, local mission spend, signed journal state, and individual policy outcomes. `/docs` exposes the API.
 
-## Avalanche Fuji
+The local controller is deliberately bound to loopback. State lives in `controller/.data/` by default; set `AGENTSAFE_DATA_DIR` to choose another local directory. The Ed25519 controller key is generated on first run and kept in that directory. Never commit or share it. Browser-driven state changes reject cross-origin requests.
 
-The contract is deliberately Fuji-only (chain ID `43113`). Build with Foundry using the configuration in `contracts/foundry.toml`:
+## Run the checks
 
 ```bash
-cd contracts
-forge build
-forge create --rpc-url https://api.avax-test.network/ext/bc/C/rpc \
-  --private-key "$FUJI_DEPLOYER_PRIVATE_KEY" \
-  src/AuditAnchor.sol:AuditAnchor
+cd controller
+uv run pytest -q
 ```
 
-Keep `FUJI_DEPLOYER_PRIVATE_KEY` in a local shell or secret manager. Never commit it or enter a seed phrase into the app. The returned contract address can be configured as `NEXT_PUBLIC_AUDIT_ANCHOR_ADDRESS` in local `.env.local` and in the AgentSafe Vercel project. The browser wallet used for anchoring must be on Fuji and hold test AVAX. A local proof does not become a chain proof until its transaction is confirmed and a transaction link is visible in the UI.
+Export and verify the journal independently:
 
-The verified hackathon deployment is [`0xde5648cded04c9eca1124234867780604f89ff7e`](https://build.avax.network/explorer/fuji/c-chain/address/0xde5648cded04c9eca1124234867780604f89ff7e), deployed by [transaction `0x52522a39a0afc395ff0f321917cb9b9f8c84ea6b17223172510497ac2219f8c0`](https://build.avax.network/explorer/fuji/c-chain/tx/0x52522a39a0afc395ff0f321917cb9b9f8c84ea6b17223172510497ac2219f8c0). An accidental duplicate deployment also succeeded at `0x62c3b9da843e66d45112ea5822b643a8e061962a`; both have matching runtime bytecode, and the app uses the later deployment above.
+```bash
+curl http://127.0.0.1:8765/journal/export > /tmp/agentsafe-journal.json
+uv run python verify_export.py /tmp/agentsafe-journal.json
+```
 
-Network details: Fuji C-Chain RPC `https://api.avax-test.network/ext/bc/C/rpc`, chain ID `43113`, explorer [Avalanche Fuji C-Chain](https://build.avax.network/explorer/fuji/c-chain).
+The verifier checks every event’s SHA-256 link and Ed25519 signature using the public key included in the export. It does not trust the controller’s `verification` field. Since there is no external checkpoint witness yet, someone who controls the database can delete an uncheckpointed tail; this is not an immutable archive.
 
-## Evidence model
+## Connect an agent
 
-The app generates a random 32-byte salt and computes `keccak256(UTF8(salt + ':' + JSON.stringify({events, artifacts})))`. The salt, event trace, and any local draft artifact are stored in browser `localStorage`; only the resulting root is submitted to `AuditAnchor`. Keep the salt with the local evidence record: without it, a third party cannot independently reproduce the commitment. Treat browser storage as demo storage, not durable or access-controlled evidence retention.
+Create a mission through `POST /missions` with an Ed25519 public key belonging to the root agent. The controller returns a signed mandate. When delegating, the parent agent signs the delegation claim with its private key; the controller checks that the child’s tools, resources, budget, duration, and delegation capability remain within the parent grant. A child signs every `POST /actions` request with the private key bound to its grant. Private agent keys must stay in the agent process or its signing service.
 
-## Track framing
+The prototype connectors are `records.share_local` and `procurement.create_order`; they save demo artifacts locally. The `procurement.create_order` connector requires an exact-parameter, one-use approval. The approval endpoint is a **demo local operator action**, not authenticated enterprise identity management. Add real connectors only behind `protected_action`, and keep their credentials unavailable to the agent runtime.
 
-The demo is a defender-facing observability and response concept aligned with Detect/Respond: make a risky tool call visible, block or pause it, and preserve a tamper-evident reference for later review. The on-chain record proves that a particular hash was submitted at a particular time; it does **not** prove the source log was truthful, complete, or safe, and it does not provide confidentiality for data that is mistakenly published.
+## What is implemented and what is not
+
+- **Working now:** local FastAPI controller, Pydantic validation, SQLite transactions, Ed25519-signed mandates and agent requests, parent-signed scoped delegation, parent budget reservation, cumulative spend checks, expiry/revocation, one-use exact-parameter approval, fail-closed pre-execution journal write, two local-only connectors, signed receipts, hash-chained events, export verifier, and an interactive local console. The demo’s two deterministic agents and handoff run through a compiled LangGraph `StateGraph`; this is a repeatable policy test harness, not an LLM-generated run.
+- **Not implemented:** Circom/Groth16 delegation proofs; a production trusted setup; authenticated human approvers; trusted data-label issuers and label propagation from real sources; real business-system connectors; a separately stored signed checkpoint; enterprise key management, tenancy, or a production deployment.
+- **Data-label limit:** the prototype applies its policy to the signed request’s declared label. It does not prove that a real source classified the data correctly or propagate labels through an external agent’s internal transformations. Private resource and destination values are represented in the journal by HMAC commitments made with the local controller key, so an exported journal alone cannot brute-force common low-entropy values.
+- **Receipt limit:** a receipt proves what this controller checked or observed. It does not prove that a model reasoned correctly or that an external tool’s response is true.
+
+## Architecture and deployment status
+
+The local controller is the enforcement point. The agent must not hold direct credentials for protected tools; if a tool call bypasses the controller, AgentSafe cannot protect it. SQLite and the signing key are designed to stay with this local process. The production Vercel site is still the earlier synthetic LangGraph dashboard; it does not host this controller, and its serverless filesystem is not the durable local SQLite deployment described here. Don’t treat the Vercel dashboard as evidence that an agent is protected.
+
+See [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) for a plain-language walkthrough and [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) for the MVP requirements and implementation status.

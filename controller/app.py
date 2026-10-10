@@ -1,0 +1,524 @@
+"""Local-first AgentSafe policy controller prototype.
+
+The only connectors shipped here are local, side-effect-free demo connectors.
+Real external tools must be registered behind the same authorize/execute path.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import sqlite3
+import time
+import uuid
+from contextlib import asynccontextmanager
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Literal, TypedDict
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
+
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("AGENTSAFE_DATA_DIR", ROOT / ".data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = Path(os.environ.get("AGENTSAFE_DB", DATA_DIR / "agentsafe.sqlite3"))
+KEY_PATH = Path(os.environ.get("AGENTSAFE_SIGNING_KEY", DATA_DIR / "ed25519.key"))
+@asynccontextmanager
+async def lifespan(_app):
+    init_db()
+    signer()
+    yield
+
+
+app = FastAPI(title="AgentSafe Local Controller", version="0.1.0", description="Local authorization gate, demo connectors, signed receipts and verifiable journal.", lifespan=lifespan)
+DEMO_AGENT_KEYS: dict[str, Ed25519PrivateKey] = {}
+
+
+@app.middleware("http")
+async def local_browser_guard(request: Request, call_next):
+    # This prototype is a local controller. Prevent remote websites and DNS-rebinding
+    # pages from driving its state-changing endpoints through the user's browser.
+    host = request.headers.get("host", "").split(":", 1)[0].strip("[]").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return JSONResponse({"detail": "bind this prototype to loopback only"}, status_code=421)
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/").lower() != f"{request.url.scheme}://{request.headers.get('host', '').lower()}".rstrip("/"):
+            return JSONResponse({"detail": "cross-origin state changes are not allowed"}, status_code=403)
+    return await call_next(request)
+
+
+@app.get("/", include_in_schema=False)
+def console():
+    return FileResponse(ROOT / "ui" / "index.html")
+
+
+def connect() -> sqlite3.Connection:
+    db = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA journal_mode=WAL")
+    return db
+
+
+@contextmanager
+def transaction(immediate: bool = False):
+    db = connect()
+    db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def sha(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def private_commitment(payload: bytes) -> str:
+    secret = signer().private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    key = hashlib.sha256(secret + b"AgentSafe local HMAC commitment v1").digest()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def private_fingerprint(value: str | None) -> str | None:
+    return private_commitment(value.encode()) if value is not None else None
+
+
+def signer() -> Ed25519PrivateKey:
+    if KEY_PATH.exists():
+        return serialization.load_pem_private_key(KEY_PATH.read_bytes(), password=None)
+    key = Ed25519PrivateKey.generate()
+    KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KEY_PATH.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    try:
+        KEY_PATH.chmod(0o600)
+    except OSError:
+        pass
+    return key
+
+
+def sign(payload: dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(signer().sign(canonical(payload))).decode().rstrip("=")
+
+
+def decode64(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def verify_signature(public: str, signature: str, payload: dict[str, Any]) -> bool:
+    try:
+        Ed25519PublicKey.from_public_bytes(decode64(public)).verify(decode64(signature), canonical(payload))
+        return True
+    except Exception:
+        return False
+
+
+def fresh_agent_key() -> tuple[str, Ed25519PrivateKey]:
+    private = Ed25519PrivateKey.generate()
+    raw = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.urlsafe_b64encode(raw).decode().rstrip("="), private
+
+
+def public_key() -> str:
+    raw = signer().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def init_db() -> None:
+    with transaction() as db:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS missions(id TEXT PRIMARY KEY, name TEXT NOT NULL, budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), agent_id TEXT NOT NULL, agent_public_key TEXT NOT NULL, parent_id TEXT REFERENCES grants(id), actions TEXT NOT NULL, resources TEXT NOT NULL, budget_limit REAL NOT NULL, budget_used REAL NOT NULL DEFAULT 0, budget_reserved REAL NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, can_delegate INTEGER NOT NULL, allow_external INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0, mandate TEXT NOT NULL, signature TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL, signature TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_id TEXT NOT NULL, tool TEXT NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, request_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
+        """)
+        # Upgrade databases created by earlier prototype iterations.
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(grants)")}
+        if "budget_reserved" not in columns:
+            db.execute("ALTER TABLE grants ADD COLUMN budget_reserved REAL NOT NULL DEFAULT 0")
+        if "agent_public_key" not in columns:
+            db.execute("ALTER TABLE grants ADD COLUMN agent_public_key TEXT NOT NULL DEFAULT ''")
+
+
+def append_event(db: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]:
+    previous = db.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+    prev_hash = previous["hash"] if previous else "0" * 64
+    event_id = str(uuid.uuid4())
+    created_at = int(time.time())
+    content = {"event_id": event_id, "created_at": created_at, **body}
+    digest = sha(bytes.fromhex(prev_hash) + canonical(content))
+    signature = sign({"hash": digest, "event_id": event_id})
+    db.execute("INSERT INTO events(event_id,created_at,body,prev_hash,hash,signature) VALUES(?,?,?,?,?,?)", (event_id, created_at, canonical(content).decode(), prev_hash, digest, signature))
+    return {**content, "prev_hash": prev_hash, "hash": digest, "signature": signature}
+
+
+class MissionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    root_agent: str = Field(min_length=1, max_length=120)
+    root_public_key: str
+    actions: list[str] = Field(min_length=1)
+    resources: list[str] = Field(min_length=1)
+    budget_limit: float = Field(gt=0)
+    ttl_seconds: int = Field(default=1800, gt=0, le=86400)
+    allow_external: bool = False
+    can_delegate: bool = True
+
+
+class DelegateRequest(BaseModel):
+    parent_grant_id: str
+    child_agent: str
+    child_public_key: str
+    parent_signature: str
+    actions: list[str]
+    resources: list[str]
+    budget_limit: float = Field(gt=0)
+    ttl_seconds: int = Field(gt=0, le=86400)
+    can_delegate: bool = False
+
+
+class ActionRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=120)
+    mission_id: str
+    grant_id: str
+    agent_id: str
+    tool: str
+    resource: str
+    amount: float = Field(default=0, ge=0)
+    destination: str | None = None
+    data_label: Literal["public", "internal", "confidential"] = "internal"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    approval_id: str | None = None
+    agent_signature: str
+
+
+class DemoFinish(BaseModel):
+    pending_order: ActionRequest
+    approval_id: str
+
+
+class DemoAgentState(TypedDict, total=False):
+    mission: dict[str, Any]
+    child: dict[str, Any]
+    child_private: Ed25519PrivateKey
+    proposals: list[ActionRequest]
+    results: dict[str, str]
+    details: dict[str, str]
+    pending_order: dict[str, Any]
+    mission_id: str
+    approved: dict[str, Any]
+    engine: str
+
+
+def mandate_payload(mission_id: str, agent: str, agent_public: str, parent_id: str | None, actions: list[str], resources: list[str], budget: float, expires: int, delegate: bool, external: bool) -> dict[str, Any]:
+    return {"mission_id": mission_id, "agent_id": agent, "agent_public_key": agent_public, "parent_grant_id": parent_id, "actions": sorted(set(actions)), "resources": sorted(set(resources)), "budget_limit": budget, "expires_at": expires, "can_delegate": delegate, "allow_external": external}
+
+
+def delegation_signing_payload(req: DelegateRequest, mission_id: str) -> dict[str, Any]:
+    return {"mission_id": mission_id, "parent_grant_id": req.parent_grant_id, "child_agent": req.child_agent, "child_public_key": req.child_public_key, "actions": sorted(set(req.actions)), "resources": sorted(set(req.resources)), "budget_limit": float(req.budget_limit), "ttl_seconds": req.ttl_seconds, "can_delegate": req.can_delegate}
+
+
+@app.get("/health")
+def health():
+    init_db()
+    return {"ok": True, "mode": "local", "database": "sqlite", "signing": "ed25519", "connectors": ["procurement.create_order", "records.share_local"], "external_connectors": False}
+
+
+@app.get("/keys/public")
+def get_public_key():
+    return {"algorithm": "Ed25519", "public_key": public_key()}
+
+
+@app.post("/missions")
+def create_mission(req: MissionCreate):
+    init_db()
+    try:
+        if len(decode64(req.root_public_key)) != 32:
+            raise ValueError()
+    except Exception:
+        raise HTTPException(422, "root_public_key must be a base64url Ed25519 public key")
+    now = int(time.time())
+    mission_id, grant_id = str(uuid.uuid4()), str(uuid.uuid4())
+    exp = now + req.ttl_seconds
+    mandate = mandate_payload(mission_id, req.root_agent, req.root_public_key, None, req.actions, req.resources, req.budget_limit, exp, req.can_delegate, req.allow_external)
+    signature = sign(mandate)
+    with transaction(immediate=True) as db:
+        db.execute("INSERT INTO missions(id,name,budget_limit,expires_at,created_at) VALUES(?,?,?,?,?)", (mission_id, req.name, req.budget_limit, exp, now))
+        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,actions,resources,budget_limit,expires_at,can_delegate,allow_external,mandate,signature) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (grant_id, mission_id, req.root_agent, req.root_public_key, json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), req.budget_limit, exp, int(req.can_delegate), int(req.allow_external), canonical(mandate).decode(), signature))
+        append_event(db, {"type": "mission.created", "mission_id": mission_id, "grant_id": grant_id, "agent_id": req.root_agent, "mandate_hash": sha(canonical(mandate))})
+    return {"mission_id": mission_id, "grant_id": grant_id, "mandate": mandate, "mandate_signature": signature, "signing_public_key": public_key()}
+
+
+@app.post("/delegations")
+def delegate(req: DelegateRequest):
+    init_db()
+    now = int(time.time())
+    with transaction(immediate=True) as db:
+        parent = db.execute("SELECT * FROM grants WHERE id=?", (req.parent_grant_id,)).fetchone()
+        if not parent:
+            raise HTTPException(404, "parent grant not found")
+        actions, resources = set(json.loads(parent["actions"])), set(json.loads(parent["resources"]))
+        if parent["revoked"] or not parent["can_delegate"] or now >= parent["expires_at"]:
+            raise HTTPException(403, "parent mandate is revoked, expired, or non-delegable")
+        if not set(req.actions) <= actions or not set(req.resources) <= resources:
+            raise HTTPException(403, "delegation expands parent scope")
+        if req.budget_limit > parent["budget_limit"] - parent["budget_used"] - parent["budget_reserved"]:
+            raise HTTPException(403, "delegation exceeds remaining parent budget")
+        claim = delegation_signing_payload(req, parent["mission_id"])
+        if not verify_signature(parent["agent_public_key"], req.parent_signature, claim):
+            raise HTTPException(403, "delegation request signature does not match parent agent identity")
+        try:
+            if len(decode64(req.child_public_key)) != 32:
+                raise ValueError()
+        except Exception:
+            raise HTTPException(422, "child_public_key must be a base64url Ed25519 public key")
+        exp = min(now + req.ttl_seconds, parent["expires_at"])
+        mission = db.execute("SELECT * FROM missions WHERE id=?", (parent["mission_id"],)).fetchone()
+        if not mission or mission["revoked"] or now >= mission["expires_at"]:
+            raise HTTPException(403, "mission is revoked or expired")
+        child_id = str(uuid.uuid4())
+        mandate = mandate_payload(parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], req.actions, req.resources, req.budget_limit, exp, bool(req.can_delegate and parent["can_delegate"]), bool(parent["allow_external"]))
+        signature = sign(mandate)
+        db.execute("INSERT INTO grants(id,mission_id,agent_id,agent_public_key,parent_id,actions,resources,budget_limit,expires_at,can_delegate,allow_external,mandate,signature) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (child_id, parent["mission_id"], req.child_agent, req.child_public_key, parent["id"], json.dumps(sorted(set(req.actions))), json.dumps(sorted(set(req.resources))), req.budget_limit, exp, int(mandate["can_delegate"]), parent["allow_external"], canonical(mandate).decode(), signature))
+        db.execute("UPDATE grants SET budget_reserved=budget_reserved+? WHERE id=?", (req.budget_limit, parent["id"]))
+        append_event(db, {"type": "delegation.issued", "mission_id": parent["mission_id"], "parent_grant_id": parent["id"], "child_grant_id": child_id, "agent_id": req.child_agent, "mandate_hash": sha(canonical(mandate))})
+    return {"grant_id": child_id, "mandate": mandate, "mandate_signature": signature, "signing_public_key": public_key(), "zk_status": "not_implemented; subset is checked directly by the local controller"}
+
+
+@app.post("/approvals")
+def issue_approval(mission_id: str, request_hash: str, ttl_seconds: int = 300):
+    """Local demo approval issuer. Production must authenticate a human approver."""
+    if len(request_hash) != 64 or ttl_seconds < 1 or ttl_seconds > 3600:
+        raise HTTPException(422, "request_hash must be SHA-256 hex and ttl 1..3600 seconds")
+    approval_id = str(uuid.uuid4())
+    with transaction(immediate=True) as db:
+        mission = db.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
+        if not mission or mission["revoked"]:
+            raise HTTPException(404, "active mission not found")
+        db.execute("INSERT INTO approvals(id,mission_id,request_hash,expires_at) VALUES(?,?,?,?)", (approval_id, mission_id, request_hash, int(time.time()) + ttl_seconds))
+        append_event(db, {"type": "approval.issued", "mission_id": mission_id, "approval_id": approval_id, "request_hash": request_hash})
+    return {"approval_id": approval_id, "request_hash": request_hash, "expires_in_seconds": ttl_seconds, "note": "demo issuer; production requires authenticated human approval"}
+
+
+def action_digest(req: ActionRequest) -> str:
+    parameters = {"mission_id": req.mission_id, "grant_id": req.grant_id, "agent_id": req.agent_id, "tool": req.tool, "resource": req.resource, "amount": float(req.amount), "destination": req.destination, "data_label": req.data_label, "payload": req.payload}
+    return private_commitment(canonical(parameters))
+
+
+def action_signing_payload(req: ActionRequest) -> dict[str, Any]:
+    payload = req.model_dump(exclude={"agent_signature", "approval_id"})
+    payload["amount"] = float(req.amount)
+    return payload
+
+
+def signed_action(private: Ed25519PrivateKey, **fields: Any) -> ActionRequest:
+    unsigned = ActionRequest(agent_signature="pending", **fields)
+    signature = base64.urlsafe_b64encode(private.sign(canonical(action_signing_payload(unsigned)))).decode().rstrip("=")
+    return unsigned.model_copy(update={"agent_signature": signature})
+
+
+@app.post("/actions/hash")
+def preview_action_hash(req: ActionRequest):
+    return {"parameter_hash": action_digest(req), "note": "This binds an approval to the exact declared parameters; the payload itself is not stored in the journal."}
+
+
+@app.post("/actions")
+def protected_action(req: ActionRequest):
+    init_db()
+    now = int(time.time())
+    digest = action_digest(req)
+    decision = "allow"
+    reason = "mandate and policies permit this local connector"
+    with transaction(immediate=True) as db:
+        if db.execute("SELECT 1 FROM events WHERE json_extract(body,'$.request_id')=?", (req.request_id,)).fetchone():
+            raise HTTPException(409, "request_id already used")
+        mission = db.execute("SELECT * FROM missions WHERE id=?", (req.mission_id,)).fetchone()
+        grant = db.execute("SELECT * FROM grants WHERE id=? AND mission_id=?", (req.grant_id, req.mission_id)).fetchone()
+        if not mission or not grant:
+            decision, reason = "block", "mission or grant not found"
+        elif mission["revoked"] or grant["revoked"]:
+            decision, reason = "block", "mission or grant revoked"
+        elif now >= min(mission["expires_at"], grant["expires_at"]):
+            decision, reason = "block", "mission or grant expired"
+        elif grant["agent_id"] != req.agent_id:
+            decision, reason = "block", "agent identity does not match grant"
+        elif not verify_signature(grant["agent_public_key"], req.agent_signature, action_signing_payload(req)):
+            decision, reason = "block", "agent request signature is invalid"
+        elif req.tool not in json.loads(grant["actions"]) or req.resource not in json.loads(grant["resources"]):
+            decision, reason = "block", "tool or resource outside grant scope"
+        elif req.amount > 0 and (mission["budget_used"] + req.amount > mission["budget_limit"] or grant["budget_used"] + grant["budget_reserved"] + req.amount > grant["budget_limit"]):
+            decision, reason = "block", "cumulative mission or grant budget exceeded"
+        elif req.data_label == "confidential" and req.destination and req.destination not in {"internal", "records.local", "procurement.local"}:
+            decision, reason = "block", "confidential data cannot flow to this destination"
+        elif req.destination and req.destination.startswith("external:") and not grant["allow_external"]:
+            decision, reason = "block", "external destination is not authorized"
+        elif req.tool == "procurement.create_order" and req.amount > 0:
+            if not req.approval_id:
+                decision, reason = "block", "operation requires an exact-request approval"
+            else:
+                approval = db.execute("SELECT * FROM approvals WHERE id=? AND mission_id=?", (req.approval_id, req.mission_id)).fetchone()
+                if not approval or approval["consumed"] or now >= approval["expires_at"] or approval["request_hash"] != digest:
+                    decision, reason = "block", "approval missing, expired, consumed, or bound to different parameters"
+                else:
+                    db.execute("UPDATE approvals SET consumed=1 WHERE id=? AND consumed=0", (req.approval_id,))
+        elif req.tool not in {"procurement.create_order", "records.share_local"}:
+            decision, reason = "block", "no connector registered for this tool"
+        if decision == "allow" and req.amount > 0:
+            db.execute("UPDATE missions SET budget_used=budget_used+? WHERE id=?", (req.amount, req.mission_id))
+            db.execute("UPDATE grants SET budget_used=budget_used+? WHERE id=?", (req.amount, req.grant_id))
+        # The decision is committed durably before the connector is invoked below.
+        event = append_event(db, {"type": "action.decision", "request_id": req.request_id, "mission_id": req.mission_id, "grant_id": req.grant_id, "agent_id": req.agent_id, "tool": req.tool, "resource_commitment": private_fingerprint(req.resource), "data_label": req.data_label, "destination_class": "external" if (req.destination or "").startswith("external:") else ("internal" if req.destination else "unspecified"), "destination_commitment": private_fingerprint(req.destination), "parameter_commitment": digest, "decision": decision, "reason": reason, "amount": req.amount})
+    if decision == "block":
+        receipt_payload = {"request_id": req.request_id, "decision": decision, "reason": reason, "event_hash": event["hash"], "observed_at": int(time.time())}
+        return {"decision": decision, "reason": reason, "receipt": {**receipt_payload, "signature": sign(receipt_payload)}}
+
+    # Demonstration connectors produce local artifacts only. No external network or email action exists.
+    try:
+        result = {"status": "success", "artifact_id": str(uuid.uuid4()), "summary": f"Local demo connector completed {req.tool} for {req.resource}"}
+        with transaction(immediate=True) as db:
+            db.execute("INSERT INTO artifacts(id,mission_id,request_id,tool,summary,created_at) VALUES(?,?,?,?,?,?)", (result["artifact_id"], req.mission_id, req.request_id, req.tool, result["summary"], int(time.time())))
+            result_event = append_event(db, {"type": "action.result", "request_id": req.request_id, "mission_id": req.mission_id, "tool": req.tool, "status": result["status"], "artifact_id": result["artifact_id"]})
+    except Exception:
+        # An ambiguous result is explicit; budget is not refunded automatically.
+        with transaction(immediate=True) as db:
+            result_event = append_event(db, {"type": "action.result", "request_id": req.request_id, "mission_id": req.mission_id, "tool": req.tool, "status": "unknown"})
+        result = {"status": "unknown", "summary": "connector result could not be confirmed"}
+    receipt_payload = {"request_id": req.request_id, "decision": "allow", "result": result, "decision_event_hash": event["hash"], "result_event_hash": result_event["hash"], "observed_at": int(time.time())}
+    return {"decision": "allow", "result": result, "receipt": {**receipt_payload, "signature": sign(receipt_payload)}}
+
+
+@app.post("/missions/{mission_id}/revoke")
+def revoke_mission(mission_id: str):
+    with transaction(immediate=True) as db:
+        mission = db.execute("SELECT id FROM missions WHERE id=?", (mission_id,)).fetchone()
+        if not mission:
+            raise HTTPException(404, "mission not found")
+        db.execute("UPDATE missions SET revoked=1 WHERE id=?", (mission_id,))
+        db.execute("UPDATE grants SET revoked=1 WHERE mission_id=?", (mission_id,))
+        event = append_event(db, {"type": "mission.revoked", "mission_id": mission_id})
+    return {"mission_id": mission_id, "revoked": True, "future_actions_blocked": True, "event_hash": event["hash"]}
+
+
+@app.get("/missions")
+def list_missions():
+    init_db()
+    with transaction() as db:
+        missions = [dict(row) for row in db.execute("SELECT id,name,budget_limit,budget_used,expires_at,revoked,created_at FROM missions ORDER BY created_at DESC")]
+        grants = [dict(row) for row in db.execute("SELECT id,mission_id,agent_id,parent_id,actions,resources,budget_limit,budget_used,budget_reserved,expires_at,can_delegate,revoked FROM grants ORDER BY rowid")]
+        artifacts = [dict(row) for row in db.execute("SELECT id,mission_id,request_id,tool,summary,created_at FROM artifacts ORDER BY created_at DESC")]
+    for grant in grants:
+        grant["actions"] = json.loads(grant["actions"])
+        grant["resources"] = json.loads(grant["resources"])
+    return {"missions": missions, "grants": grants, "artifacts": artifacts}
+
+
+def verify_journal() -> dict[str, Any]:
+    errors, prev = [], "0" * 64
+    with transaction() as db:
+        rows = db.execute("SELECT * FROM events ORDER BY seq").fetchall()
+    pub = signer().public_key()
+    for row in rows:
+        body = json.loads(row["body"])
+        expected = sha(bytes.fromhex(prev) + canonical(body))
+        try:
+            pub.verify(base64.urlsafe_b64decode(row["signature"] + "=" * (-len(row["signature"]) % 4)), canonical({"hash": expected, "event_id": row["event_id"]}))
+        except Exception:
+            errors.append({"seq": row["seq"], "error": "signature invalid"})
+        if row["prev_hash"] != prev or row["hash"] != expected:
+            errors.append({"seq": row["seq"], "error": "hash chain mismatch"})
+        prev = row["hash"]
+    return {"valid": not errors, "event_count": len(rows), "head_hash": prev if rows else None, "errors": errors, "limitation": "A database administrator can delete an uncheckpointed journal tail; this prototype has no external checkpoint witness."}
+
+
+@app.get("/journal/verify")
+def verify_endpoint():
+    init_db()
+    return verify_journal()
+
+
+@app.get("/journal/export")
+def export_journal():
+    init_db()
+    with transaction() as db:
+        rows = [dict(row) for row in db.execute("SELECT seq,event_id,created_at,body,prev_hash,hash,signature FROM events ORDER BY seq")]
+    return {"algorithm": "SHA-256 chain + Ed25519 event signatures", "public_key": public_key(), "events": rows, "verification": verify_journal()}
+
+
+@app.post("/demo/run")
+def run_demo():
+    """Run two deterministic demo agents through a compiled LangGraph and controller gate."""
+    def agent_a_delegates(_state: DemoAgentState) -> DemoAgentState:
+        root_public, root_private = fresh_agent_key()
+        child_public, child_private = fresh_agent_key()
+        mission = create_mission(MissionCreate(name="AgentSafe local demo", root_agent="agent-a", root_public_key=root_public, actions=["procurement.create_order", "records.share_local"], resources=["supplier-x", "invoice-1842"], budget_limit=100, ttl_seconds=3600, can_delegate=True))
+        delegation_request = DelegateRequest(parent_grant_id=mission["grant_id"], child_agent="agent-b", child_public_key=child_public, parent_signature="pending", actions=["procurement.create_order", "records.share_local"], resources=["supplier-x", "invoice-1842"], budget_limit=80, ttl_seconds=1800, can_delegate=False)
+        parent_signature = base64.urlsafe_b64encode(root_private.sign(canonical(delegation_signing_payload(delegation_request, mission["mission_id"])))).decode().rstrip("=")
+        child = delegate(delegation_request.model_copy(update={"parent_signature": parent_signature}))
+        return {"mission": mission, "child": child, "child_private": child_private}
+
+    def agent_b_proposes(state: DemoAgentState) -> DemoAgentState:
+        mission, child, private = state["mission"], state["child"], state["child_private"]
+        grant_id = child["grant_id"]
+        DEMO_AGENT_KEYS[grant_id] = private
+        common = {"mission_id": mission["mission_id"], "grant_id": grant_id, "agent_id": "agent-b", "tool": "records.share_local", "resource": "invoice-1842", "data_label": "confidential", "payload": {"record_ref": "local://invoice-1842"}}
+        proposals = [
+            signed_action(private, request_id=str(uuid.uuid4()), **common, destination="internal"),
+            signed_action(private, request_id=str(uuid.uuid4()), **common, destination="external:personal-mail"),
+            signed_action(private, request_id=str(uuid.uuid4()), mission_id=mission["mission_id"], grant_id=grant_id, agent_id="agent-b", tool="procurement.create_order", resource="supplier-x", amount=70, payload={"currency": "EUR", "line_items_ref": "local://order"}),
+        ]
+        return {"proposals": proposals}
+
+    def controller_gate(state: DemoAgentState) -> DemoAgentState:
+        with transaction(immediate=True) as db:
+            append_event(db, {"type": "agent.graph.trace", "mission_id": state["mission"]["mission_id"], "runtime": "LangGraph StateGraph", "steps": ["agent_a_delegate", "agent_b_propose", "controller_policy_gate"], "scenario_source": "deterministic local test fixture"})
+        allowed, blocked_data, blocked_approval = [protected_action(proposal) for proposal in state["proposals"]]
+        return {"results": {"internal_confidential_transfer": allowed["decision"], "external_confidential_transfer": blocked_data["decision"], "missing_approval": blocked_approval["decision"]}, "details": {"external_confidential_transfer": blocked_data["reason"], "missing_approval": blocked_approval["reason"]}, "pending_order": state["proposals"][2].model_dump()}
+
+    graph = StateGraph(DemoAgentState)
+    graph.add_node("agent_a_delegate", agent_a_delegates)
+    graph.add_node("agent_b_propose", agent_b_proposes)
+    graph.add_node("controller_policy_gate", controller_gate)
+    graph.add_edge(START, "agent_a_delegate")
+    graph.add_edge("agent_a_delegate", "agent_b_propose")
+    graph.add_edge("agent_b_propose", "controller_policy_gate")
+    graph.add_edge("controller_policy_gate", END)
+    result = graph.compile().invoke({})
+    order = ActionRequest.model_validate(result["pending_order"])
+    return {"mission": result["mission"]["mission_id"], "delegation": result["child"]["grant_id"], "results": result["results"], "details": result["details"], "pending_order": result["pending_order"], "pending_order_hash": action_digest(order), "agent_runtime": "LangGraph StateGraph · Agent A delegation → Agent B proposals → AgentSafe policy gate", "model": "Deterministic synthetic scenario; Mistral is not called by this test harness", "journal": verify_journal(), "synthetic_or_live": "The missions, agent identities, data and connector effects are synthetic/local demo records. All proposed actions are signature-checked by the controller; no external tools are called."}
+
+
+@app.post("/demo/finish")
+def finish_demo(req: DemoFinish):
+    # Approval continues a new, uniquely identified attempt with identical parameters.
+    private = DEMO_AGENT_KEYS.get(req.pending_order.grant_id)
+    if private is None:
+        raise HTTPException(409, "demo agent session expired; start the demo again")
+    action_fields = req.pending_order.model_dump(exclude={"agent_signature", "approval_id"})
+    action_fields.update({"approval_id": req.approval_id, "request_id": str(uuid.uuid4())})
+    order = signed_action(private, **action_fields)
+    if not order.approval_id:
+        raise HTTPException(422, "approval required")
+    approved = protected_action(order)
+    if approved["decision"] != "allow":
+        raise HTTPException(409, f"approved action did not pass controller: {approved['reason']}")
+    over_budget = protected_action(signed_action(private, request_id=str(uuid.uuid4()), mission_id=order.mission_id, grant_id=order.grant_id, agent_id=order.agent_id, tool=order.tool, resource=order.resource, amount=20, payload={"currency": "EUR"}))
+    revoked = revoke_mission(order.mission_id)
+    after_revoke = protected_action(signed_action(private, request_id=str(uuid.uuid4()), mission_id=order.mission_id, grant_id=order.grant_id, agent_id=order.agent_id, tool="records.share_local", resource="invoice-1842", payload={"ref": "local"}))
+    return {"results": {"approved_order": approved["decision"], "budget_overrun": over_budget["decision"], "revoked_mission": after_revoke["decision"]}, "details": {"budget_overrun": over_budget["reason"], "revoked_mission": after_revoke["reason"]}, "approved_order_receipt": approved["receipt"], "revoke": revoked, "journal": verify_journal(), "synthetic_or_live": "Purchase was recorded as a local demo artifact; no external tool was called."}
