@@ -71,7 +71,7 @@ flowchart LR
 | Signatures | Ed25519 | Verify which controller key signed a mandate or receipt |
 | Audit history | SHA-256-linked, signed events | Detect edits to retained journal history and export JSONL |
 | Delegation privacy | Circom, Poseidon, Groth16, snarkjs | Prove selected parent/child mandate limits at delegation time |
-| Optional checkpoint | Deployed Avalanche Fuji `AuditAnchor` contract | Store a salted journal commitment after explicit wallet confirmation |
+| On-chain checkpoint | Deployed Avalanche Fuji `AuditAnchor` contract | A salted journal commitment is confirmed on Fuji; later checkpoints require explicit wallet confirmation |
 | Analyst console | React, TypeScript, Material UI, Vite | Inspect missions, decisions, alerts, evidence, and revocation controls |
 
 ## Model routing
@@ -93,6 +93,8 @@ The model chain generates suggestions. AgentSafe's controller makes the separate
 - **Groth16 delegation proof** demonstrates only the parent/child constraints encoded in the circuit. The demo uses development proving parameters, not an audited production ceremony.
 - **Avalanche Fuji checkpoint** records a salted commitment for a verified journal head. It does not publish the journal or prove that its contents are true. The contract is real; the wallet must approve a zero-value testnet transaction and pays test-network gas.
 
+The demo has a confirmed Fuji transaction: [verify the journal checkpoint](https://build.avax.network/explorer/fuji/c-chain/tx/0xd78024ab65943451fc6ebb37c962e1cf3b581876a6c3d68ab5b7907a5861aa4e). The workflow also completed from the live dashboard: three Bedrock specialists proposed an external personal-email transfer, AgentSafe blocked it, and the signed journal stayed valid.
+
 ## What the demo does not claim
 
 - AWS Lambda is the deployed runtime. The Workshop role does not allow Amazon Bedrock AgentCore runtime operations, so AgentCore is not active.
@@ -106,4 +108,4 @@ The model chain generates suggestions. AgentSafe's controller makes the separate
 
 ## Short pitch
 
-> AgentSafe puts a verifiable permission check between AI agents and the tools they can affect. Agents can research and propose, while the controller enforces mission limits, blocks prohibited transfers, records signed evidence, and gives security teams a way to stop future actions. The demo runs a real LangGraph and Bedrock workflow on AWS against a persistent synthetic company workspace, with Ed25519 audit receipts, Groth16 delegation proofs, and an optional Avalanche testnet checkpoint.
+> AgentSafe puts a verifiable permission check between AI agents and the tools they can affect. Agents can research and propose, while the controller enforces mission limits, blocks prohibited transfers, records signed evidence, and gives security teams a way to stop future actions. The demo runs a real LangGraph and Bedrock workflow on AWS against a persistent synthetic company workspace, with Ed25519 audit receipts, Groth16 delegation proofs, and a confirmed Avalanche testnet checkpoint.

@@ -56,6 +56,8 @@ AgentCore and OpenSearch are not active in the workshop deployment. The prototyp
 
 **Live AWS demo:** [Open AgentSafe](https://7zjv7oxejxnxrq63rxahstxa2a0rbgee.lambda-url.us-west-2.on.aws/). It runs as an AWS Lambda container with a public HTTPS Function URL, shared Supabase PostgreSQL persistence, and a ten-request concurrency cap. The live Bedrock workflow has a separate limit of ten runs per UTC day.
 
+**Verified on October 11, 2026:** the live browser button completed all three Bedrock-backed LangGraph steps. The planner proposed sending the confidential invoice to a personal email; the independent controller denied it and saved the signed receipt. The delegation proof verified as Groth16, and the current 33-event journal verifies with no errors. A prior journal checkpoint is confirmed on Avalanche Fuji: [view the transaction](https://build.avax.network/explorer/fuji/c-chain/tx/0xd78024ab65943451fc6ebb37c962e1cf3b581876a6c3d68ab5b7907a5861aa4e). These checks use synthetic company data and do not call an external business tool.
+
 ## Development
 
 The hosted AWS demo is the primary live path. For isolated development, use Python 3.10+, Node.js 20+, npm, and `uv`:
