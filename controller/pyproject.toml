@@ -18,7 +18,7 @@ package = false
 entrypoint = "app:app"
 
 [tool.vercel.scripts]
-build = "npm run build && npm prune --omit=dev"
+build = "npm ci && npm run build && npm prune --omit=dev"
 
 [dependency-groups]
 dev = [
