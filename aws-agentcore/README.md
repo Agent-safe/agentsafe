@@ -2,9 +2,9 @@
 
 ## Current deployment path
 
-The current AWS demo is an AWS Lambda container running the AgentSafe FastAPI controller and a three-step LangGraph workflow. It calls Amazon Bedrock directly through the Lambda execution role. It does not call Vercel, AgentCore Runtime, or OpenSearch.
+The current AWS demo is an AWS Lambda container running the AgentSafe FastAPI controller and a three-step LangGraph workflow. Lambda is the compute runtime; LangGraph is the multi-agent orchestration framework. It calls Amazon Bedrock directly through the Lambda execution role. This deployed architecture works without AgentCore and does not call Vercel, AgentCore Runtime, or OpenSearch.
 
-The workshop participant role denies AgentCore runtime control operations. No OpenSearch collection was provisioned. The LangGraph workflow receives a few synthetic Acme Commerce rules bundled with the service. These limitations are shown in the workflow details rather than hidden behind an “online” badge.
+The workshop participant role denies AgentCore runtime control operations. No OpenSearch collection was provisioned. The LangGraph workflow receives a few synthetic Acme Commerce rules bundled with the service. These scope boundaries are shown in the workflow details rather than hidden behind an “online” badge.
 
 The deployment template is [`lambda-stack.yaml`](lambda-stack.yaml). The container recipe and request handler are in `../controller/Dockerfile` and `../controller/lambda_handler.py`.
 
@@ -34,4 +34,4 @@ The Container Function URL is public so reviewers can open the dashboard without
 
 ## Older AgentCore experiment
 
-`agentcore/` contains the earlier AgentCore/Strands exploration. Its CDK scaffold is not the active runtime and must not be described as deployed. The workshop role did not permit AgentCore runtime operations, so the current implementation uses LangGraph on Lambda as the fallback orchestration path.
+`agentcore/` contains the earlier AgentCore/Strands exploration. Its CDK scaffold is not the active runtime and must not be described as deployed. The workshop role did not permit AgentCore runtime operations. The current, working implementation runs LangGraph on Lambda; this is the selected hosting path for the demo, not an AgentCore dependency.

@@ -10,7 +10,7 @@ The console opens in **Acme Commerce**, a fictional online retailer. It has name
 
 The AWS path runs three named specialists in LangGraph and calls Amazon Bedrock directly. Anthropic is first, followed by Mistral, Nova Lite, Claude Haiku, and Nova 2 Lite as model fallbacks. The model can suggest a destination, but it cannot approve the transfer. AgentSafe checks the signed delegation and blocks a confidential invoice from going to personal email. A shared database limit caps the live workflow at ten runs per UTC day.
 
-The workshop role does not allow the AgentCore runtime APIs, and no OpenSearch collection was provisioned. Therefore, the live AWS route uses Lambda, LangGraph, and Bedrock Converse; its short policy notes are bundled with the demo. The local policy workflow is deterministic and makes no model call. Each card in the app states which systems it uses.
+The live AWS architecture is complete without AgentCore: Lambda is the deployed compute runtime, LangGraph coordinates the three specialists, and Bedrock Converse supplies the models. These are different layers, so LangGraph is the orchestration framework and Lambda is the runtime alternative in this deployment. The workshop role denies AgentCore runtime API access, and no OpenSearch collection was provisioned; policy notes are bundled with the demo. The local policy workflow is deterministic and makes no model call. Each card in the app states which systems it uses.
 
 ## Product screens
 
@@ -52,7 +52,7 @@ flowchart LR
 | Signatures and journal | Ed25519, SHA-256 | Authenticate mandates and make journal edits detectable |
 | Optional external checkpoint | Avalanche Fuji | Record a salted fingerprint of a journal head |
 
-AgentCore and OpenSearch are not active in the workshop deployment. The prototype does not include real company connectors, SIEM delivery, authenticated enterprise approvers, or production ZK parameters.
+AgentCore and OpenSearch are not active in the workshop deployment, but neither is required for the deployed Lambda + LangGraph + Bedrock workflow. The prototype does not include real company connectors, SIEM delivery, authenticated enterprise approvers, or production ZK parameters.
 
 **Live AWS demo:** [Open AgentSafe](https://7zjv7oxejxnxrq63rxahstxa2a0rbgee.lambda-url.us-west-2.on.aws/). It runs as an AWS Lambda container with a public HTTPS Function URL, shared Supabase PostgreSQL persistence, and a ten-request concurrency cap. The live Bedrock workflow has a separate limit of ten runs per UTC day.
 

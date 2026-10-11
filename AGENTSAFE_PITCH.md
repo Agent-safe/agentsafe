@@ -64,7 +64,7 @@ flowchart LR
 
 | Capability | Implementation | What it demonstrates |
 | --- | --- | --- |
-| Agent workflow | Three-step LangGraph graph on AWS Lambda | Specialist agents can propose an action without receiving authority to approve it |
+| Agent workflow | Three-step LangGraph graph, hosted on AWS Lambda | A real orchestration framework coordinates specialists; the controller alone authorizes their proposals |
 | Model inference | Amazon Bedrock Converse | Five-model fallback chain: Claude Sonnet 4.5, Mistral Pixtral Large, Nova Lite, Claude Haiku 4.5, Nova 2 Lite |
 | Authorization | FastAPI controller and signed mission grants | Tool, resource, parameters, delegation, budget, expiry, revocation, and approval checks |
 | Shared state | Supabase PostgreSQL session pooler | Missions and audit evidence persist across browser sessions and deployments |
@@ -97,7 +97,7 @@ The demo has a confirmed Fuji transaction: [verify the journal checkpoint](https
 
 ## What the demo does not claim
 
-- AWS Lambda is the deployed runtime. The Workshop role does not allow Amazon Bedrock AgentCore runtime operations, so AgentCore is not active.
+- The live architecture uses AWS Lambda as its runtime, LangGraph for multi-agent orchestration, and Bedrock for model calls. LangGraph and AgentCore serve different layers: LangGraph coordinates the agents; AgentCore is an optional managed runtime/platform. The workshop role denies AgentCore runtime operations, so this deployment uses Lambda directly and does not depend on AgentCore.
 - OpenSearch is not provisioned. The specialists receive short fictional policy notes bundled with the service; there is no vector search.
 - Business connectors are synthetic. No real email, purchase, finance, supplier, or customer system is connected.
 - The group roster is demonstrative. It does not issue cryptographic group credentials or establish shared budgets for real agents.

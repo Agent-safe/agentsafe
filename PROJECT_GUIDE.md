@@ -33,9 +33,9 @@ flowchart LR
 
 ## AWS model path
 
-The workshop account explicitly denies AgentCore runtime API access. The deployed AWS plan therefore uses Lambda as the application runtime, LangGraph for the three-specialist workflow, and direct Bedrock Converse calls. The order is Anthropic Claude Sonnet 4.5, Mistral Pixtral Large, Nova Lite, Anthropic Claude Haiku 4.5, then Nova 2 Lite. Each step tries that chain and fails closed if no model returns a usable answer.
+The deployed architecture is a working AWS path: Lambda is the application runtime, LangGraph coordinates the three-specialist workflow, and Bedrock Converse provides model calls. AgentCore is an optional managed runtime/platform layer rather than the orchestration framework; the workshop account explicitly denies its runtime API access, so this system runs directly on Lambda and does not depend on AgentCore. The model order is Anthropic Claude Sonnet 4.5, Mistral Pixtral Large, Nova Lite, Anthropic Claude Haiku 4.5, then Nova 2 Lite. Each step tries that chain and fails closed if no model returns a usable answer.
 
-OpenSearch Serverless has not been provisioned in the workshop account. The AWS specialist workflow receives a short set of synthetic policy notes bundled with the service. It does not claim vector search or AgentCore. The public live demo is capped at ten model workflows each UTC day.
+OpenSearch Serverless has not been provisioned in the workshop account. The AWS specialist workflow receives a short set of synthetic policy notes bundled with the service. It does not claim vector search. The public live demo is capped at ten model workflows each UTC day.
 
 ## Architecture
 
