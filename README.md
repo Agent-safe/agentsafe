@@ -54,6 +54,8 @@ flowchart LR
 
 AgentCore and OpenSearch are not active in the workshop deployment. The prototype does not include real company connectors, SIEM delivery, authenticated enterprise approvers, or production ZK parameters.
 
+**Live AWS demo:** [Open AgentSafe](https://7zjv7oxejxnxrq63rxahstxa2a0rbgee.lambda-url.us-west-2.on.aws/). It runs as an AWS Lambda container with a public HTTPS Function URL, shared Supabase PostgreSQL persistence, and a ten-request concurrency cap. The live Bedrock workflow has a separate limit of ten runs per UTC day.
+
 ## Development
 
 The hosted AWS demo is the primary live path. For isolated development, use Python 3.10+, Node.js 20+, npm, and `uv`:
