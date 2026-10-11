@@ -112,7 +112,7 @@ flowchart LR
 | Journal integrity | SHA-256 hash chain | Link events so edits or missing middle events are detectable |
 | Delegation privacy | Circom, Poseidon, Groth16 on BN254 | Prove the encoded child mandate is within its parent mandate |
 | External checkpoint | Avalanche Fuji C-Chain contract and MetaMask | Store a salted commitment to a verified journal head |
-| Hosting | Vercel | Host the API, console, and isolated AWS identity bridge |
+| Hosting | Vercel | Host the API and console; the AWS identity bridge is blocked by the workshop account policy |
 
 ## Why there are several cryptographic parts
 
@@ -129,7 +129,13 @@ The Groth16 circuit's current parameters are for a development demo, not an audi
 
 ## The AWS workflow and model fallback
 
-The intended AWS path uses the workshop's requested services:
+The AWS resources are provisioned, but the live Vercel-to-AWS workflow is currently blocked:
+
+- AWS Organizations explicitly denies IAM OIDC-provider operations in this workshop account, so Vercel cannot assume a narrowly scoped runtime role. No static AWS credentials are stored in Vercel as a workaround.
+- A direct AgentCore runtime probe reached the model stage but failed: Anthropic model access was denied, and the Mistral inference profile was throttled. A successful model call has not been verified.
+- The production AWS button stays disabled until an approved identity bridge is available and the Bedrock chain succeeds end to end.
+
+Once those prerequisites are cleared, the AWS path uses the workshop's requested services:
 
 1. Amazon Bedrock AgentCore Runtime runs three specialists: Research, Security Analyst, and Action Planner.
 2. Amazon Bedrock runs the model calls. Each specialist uses a task-specific Anthropic model first and tries the configured fallbacks; Mistral is last.
@@ -138,13 +144,13 @@ The intended AWS path uses the workshop's requested services:
 5. AgentCore returns an untrusted proposed action to the separate AgentSafe FastAPI controller.
 6. AgentSafe checks and records the decision. The runtime has no business-tool credentials and does not execute the proposed business action.
 
-The local deterministic workflow is separately labeled. It does not call any model or AWS service, but it exercises the real controller, database persistence, policy checks, Groth16 delegation proof code, and synthetic connectors. The AWS button must report unavailable until the runtime, OpenSearch index, model permissions, and Vercel OIDC bridge are all configured and a full request succeeds. Checking model access by itself is not proof that this end-to-end path works.
+The local deterministic workflow is separately labeled. It does not call any model or AWS service, but it exercises the controller, PostgreSQL persistence, policy checks, Groth16 delegation proof code, and synthetic connectors. The production health route, demo-company profile, and Groth16 status have been checked successfully. Checking those paths does not prove the AWS workflow works; the AWS button remains unavailable until model calls and the full Vercel-to-AgentCore request succeed.
 
 ## What is real in this demo and what is not
 
 **Working product paths:** the Material UI console reads persisted API state; the controller issues and checks signed mandates; the deterministic LangGraph scenario exercises policy decisions and local demo connectors; the Groth16 delegation proof is generated and verified; Supabase Postgres persists hosted state; the journal verifier checks signatures and hashes; JSONL is exportable; the deployed Fuji contract can store and verify salted checkpoints after a wallet transaction is confirmed.
 
-**Requires customer integration or AWS setup:** real procurement, email, finance, identity-provider, and SIEM integrations; production AgentCore and OpenSearch resources; authenticated approver identities; individual group-member credentials; key rotation and recovery; audited ZK setup; retention and backup controls; and operational monitoring.
+**Requires customer integration or additional AWS setup:** real procurement, email, finance, identity-provider, and SIEM integrations; an AWS-approved Vercel identity bridge; available Bedrock model access and quota; authenticated approver identities; individual group-member credentials; key rotation and recovery; audited ZK setup; retention and backup controls; and operational monitoring. The AgentCore runtime and synthetic OpenSearch index already exist in the workshop account.
 
 The company workspace is a realistic simulation, not a connection into Acme Commerce or a customer's private network. A customer deployment would install or connect the controller to approved company systems, register each protected connector, map the customer's identities and policies, and ensure agents cannot call protected tools around the controller.
 
