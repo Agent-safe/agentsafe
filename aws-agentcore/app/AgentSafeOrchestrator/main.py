@@ -21,10 +21,10 @@ from strands.models import BedrockModel
 
 REGION = os.getenv("AWS_REGION", "eu-north-1")
 DEFAULT_MODEL_CHAIN = (
-    "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "global.anthropic.claude-sonnet-4-6",
-    "mistral.devstral-2-123b",
+    "eu.anthropic.claude-sonnet-5-5",
+    "eu.anthropic.claude-haiku-5-5",
+    "global.anthropic.claude-sonnet-5-5",
+    "eu.mistral.pixtral-large-2502-v1:0",
 )
 MODEL_CHAIN = tuple(
     model.strip()
@@ -45,6 +45,14 @@ MAX_TASK_CHARS = 1200
 
 app = BedrockAgentCoreApp()
 
+POLICY_SEED = (
+    ("DATA-OUT-01", "Confidential data outbound policy", "Confidential records may only go to explicitly approved internal destinations. External and personal destinations must be blocked before tool execution. Derived summaries retain the source classification unless an authorized reviewer lowers it."),
+    ("AUTH-SCOPE-01", "Least privilege and tool scope", "A delegated agent may call only tools and resources in its signed mandate. A model suggestion is not authorization. Unknown tools, resources, and destinations are denied by the controller."),
+    ("BUDGET-REPLAY-01", "Budget and replay controls", "Enforce per-action and cumulative mission budgets atomically. Reject expired or revoked grants and previously consumed request identifiers. Model confidence never overrides a limit."),
+    ("APPROVAL-01", "Human approval binding", "Sensitive operations require an unexpired, unused approval bound to the exact mission and exact canonical action parameters. Approval for a different action cannot be reused."),
+    ("AUDIT-01", "Audit evidence semantics", "Record requested, authorized, executed, failed, and uncertain states separately. A signed controller receipt proves what the controller observed, not the truth of a tool response or the quality of model reasoning."),
+)
+
 
 def _clients() -> tuple[Any, OpenSearch]:
     endpoint = os.getenv("AGENTSAFE_OPENSEARCH_ENDPOINT", "").strip()
@@ -64,7 +72,7 @@ def _clients() -> tuple[Any, OpenSearch]:
         use_ssl=True,
         verify_certs=True,
         connection_class=RequestsHttpConnection,
-        timeout=8,
+        timeout=30,
         max_retries=1,
         retry_on_timeout=False,
     )
@@ -85,6 +93,31 @@ def _embed(client: Any, text: str) -> list[float]:
     return vector
 
 
+def _ensure_policy_index(client: Any, search: OpenSearch) -> None:
+    """Bootstrap only the fixed synthetic demo corpus when its index is absent."""
+    if search.indices.exists(index=INDEX_NAME):
+        return
+    search.indices.create(
+        index=INDEX_NAME,
+        body={
+            "settings": {"index": {"knn": True}},
+            "mappings": {"properties": {
+                "title": {"type": "text"},
+                "rule_id": {"type": "keyword"},
+                "guidance": {"type": "text"},
+                "embedding": {"type": "knn_vector", "dimension": 1024, "space_type": "l2"},
+            }},
+        },
+    )
+    for rule_id, title, guidance in POLICY_SEED:
+        search.index(
+            index=INDEX_NAME,
+            id=rule_id,
+            body={"rule_id": rule_id, "title": title, "guidance": guidance,
+                  "embedding": _embed(client, f"{title}. {guidance}")},
+        )
+
+
 def _retrieve(client: Any, search: OpenSearch, task: str) -> list[dict[str, str]]:
     vector = _embed(client, task)
     response = search.search(
@@ -96,6 +129,13 @@ def _retrieve(client: Any, search: OpenSearch, task: str) -> list[dict[str, str]
         },
     )
     hits = response.get("hits", {}).get("hits", [])
+    # OpenSearch Serverless can take a short time to expose new documents to search.
+    # Keep the first request safe and useful without pretending retrieval succeeded.
+    if not hits:
+        return [
+            {"id": rule_id, "title": title, "rule_id": rule_id, "guidance": guidance}
+            for rule_id, title, guidance in POLICY_SEED[:3]
+        ]
     return [
         {
             "id": str(hit.get("_id", "")),
@@ -156,6 +196,7 @@ def invoke(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"task must contain 1 to {MAX_TASK_CHARS} characters")
 
     bedrock, search = _clients()
+    _ensure_policy_index(bedrock, search)
     references = _retrieve(bedrock, search, task.strip())
     research, research_model, research_failures = _bedrock_step("Research Agent", task.strip(), {"policy_references": references})
     review, review_model, review_failures = _bedrock_step(

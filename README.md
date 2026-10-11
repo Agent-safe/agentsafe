@@ -22,7 +22,7 @@ flowchart LR
   Operator[Security operator] -->|revoke mission| Controller
 ```
 
-The AWS-backed workflow uses three sequential Strands agents hosted by Bedrock AgentCore: Research, Security Analyst, and Action Planner. Role-specific Anthropic models are tried first, followed by a four-model fallback chain ending with Mistral Devstral. The model output remains an untrusted proposal; only the AgentSafe controller decides. See [`HOW_AGENTSAFE_WORKS.md`](HOW_AGENTSAFE_WORKS.md) for detailed sequence and model-routing diagrams.
+The AWS-backed workflow uses three sequential Strands agents hosted by Bedrock AgentCore: Research, Security Analyst, and Action Planner. Each role tries its preferred Anthropic model first; the configured four-model chain ends with the EU Mistral Pixtral inference profile. The model output remains an untrusted proposal; only the AgentSafe controller decides. See [`HOW_AGENTSAFE_WORKS.md`](HOW_AGENTSAFE_WORKS.md) for detailed sequence and model-routing diagrams. The AWS runtime and OpenSearch collection are provisioned, but the hosted Vercel-to-AWS identity bridge is not enabled in this workshop account yet, so the production AWS button must remain unavailable.
 
 ## Stack
 
@@ -31,7 +31,7 @@ The AWS-backed workflow uses three sequential Strands agents hosted by Bedrock A
 | Controller/API | Python, FastAPI, Pydantic |
 | Persistence | Supabase PostgreSQL via transaction pooler; SQLite for isolated development |
 | Agent orchestration | Amazon Bedrock AgentCore Runtime, Strands Agents |
-| Model routing | Amazon Bedrock: Claude Sonnet 4.5 → Claude Haiku 4.5 → Claude Sonnet 4.6 → Mistral Devstral 2 123B |
+| Model routing | Amazon Bedrock: EU Claude Sonnet 5.5 → EU Claude Haiku 5.5 → Global Claude Sonnet 5.5 → EU Mistral Pixtral Large 25.02 |
 | Policy retrieval | Titan embeddings and OpenSearch Serverless |
 | Delegation proof | Circom 2, Poseidon, Groth16, snarkjs |
 | Signatures and journal | Ed25519, SHA-256 hash chain |

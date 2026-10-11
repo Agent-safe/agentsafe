@@ -32,9 +32,9 @@ The hosted demonstration represents a fictional company and uses synthetic agent
 
 Amazon Bedrock AgentCore Runtime hosts three sequential Strands agents: Research Agent, Security Analyst Agent, and Action Planner Agent. Amazon Bedrock runs inference. Amazon Titan creates embeddings and OpenSearch Serverless retrieves synthetic policy guidance. The runtime can propose actions but has no business-tool credentials; FastAPI remains the authorization boundary.
 
-Four Bedrock models are configured as a fallback chain, in provider order: Claude Sonnet 4.5, Claude Haiku 4.5, Claude Sonnet 4.6, then Mistral Devstral 2 123B. AWS Converse smoke checks in the workshop account returned `OK` for each. Role preferences specialize the primary model: Sonnet 4.5 for research, Sonnet 4.6 for security review, and Haiku 4.5 for structured planning. Each role then tries the remaining configured models in order. Empty output and invalid planner JSON trigger fallback. The interface records which model served each role and which earlier attempts failed.
+Four Bedrock model IDs are configured in provider order: `eu.anthropic.claude-sonnet-5-5`, `eu.anthropic.claude-haiku-5-5`, `global.anthropic.claude-sonnet-5-5`, and the EU Mistral inference profile `eu.mistral.pixtral-large-2502-v1:0`. Role preferences specialize the primary model: Sonnet for research, a separate Anthropic model for security review, and Haiku for structured planning. Each role then tries the remaining configured models. Provider errors, empty output, and invalid planner JSON trigger fallback. A live runtime test must confirm the chain before it is presented as working. The Anthropic first-use details were submitted to AWS; Mistral requires its EU inference-profile ID, not the raw foundation-model ID.
 
-Model access was verified in the AWS workshop session; that does not by itself mean the AgentCore runtime and OpenSearch collection are deployed or reachable from Vercel. The dashboard must continue to label the live AWS workflow unavailable until runtime, index, and Vercel-to-AWS identity are all configured and a real end-to-end call succeeds.
+The AgentCore runtime and OpenSearch collection are deployed in AWS. AWS Organizations denied creation of the OIDC provider needed for Vercel to assume a narrowly scoped role, so hosted Vercel cannot invoke that runtime yet. The dashboard must keep the AWS workflow unavailable until an approved identity bridge exists and a real end-to-end request plus persisted controller decision succeeds.
 
 ## Components
 
@@ -47,7 +47,7 @@ Model access was verified in the AWS workshop session; that does not by itself m
 | Delegation privacy | Circom 2, circomlib/Poseidon, Groth16, snarkjs | Prove the bounded parent-child relation at delegation time |
 | Agent orchestration | AWS Bedrock AgentCore with Strands Agents | Run specialist proposal agents in the AWS-backed path |
 | Policy retrieval | Bedrock Titan embeddings and OpenSearch Serverless | Retrieve synthetic rule guidance for the agents |
-| Dashboard | HTML, CSS, JavaScript served by FastAPI | Separate mission, workflow, access, audit, and response views |
+| Dashboard | React, TypeScript, Material UI, Vite | Separate mission, workflow, access, audit, and response views |
 | Hosted demo | Vercel | Serve the controller and console; isolate Node proof/AWS bridge functions |
 
 Private signing keys stay with the signing components, not in prompts. Raw document and prompt content is not copied into the audit journal. Low-entropy private values are represented using keyed commitments.

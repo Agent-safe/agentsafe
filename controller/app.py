@@ -1139,11 +1139,21 @@ def invoke_aws_agentcore(request: Request, payload: dict[str, Any]) -> dict[str,
 def aws_status():
     configured = all(os.environ.get(key) for key in ("AGENTSAFE_AWS_BRIDGE_SECRET", "AWS_ROLE_ARN", "AGENTCORE_RUNTIME_ARN", "AGENTSAFE_AWS_REGION"))
     available = configured and bool(os.environ.get("VERCEL_URL"))
+    runtime_provisioned = bool(os.environ.get("AGENTCORE_RUNTIME_ARN"))
+    if available:
+        setup_message = "AWS identity bridge configured; run the workflow to confirm live readiness."
+    elif runtime_provisioned:
+        setup_message = "Blocked: AWS Organizations denies Vercel OIDC role setup, so this deployment cannot reach the runtime. A direct runtime check also found Anthropic model access unavailable and Mistral throttling; the AWS workflow is not verified even after identity is enabled."
+    else:
+        setup_message = "The AWS runtime and Vercel identity bridge are not configured in this deployment."
     model_chain = [model.strip() for model in os.environ.get("BEDROCK_MODEL_CHAIN", "").split(",") if model.strip()]
     return {
         "configured": configured,
         "available": available,
-        "runtime": "Amazon Bedrock AgentCore Runtime" if configured else "not configured",
+        "runtime_provisioned": runtime_provisioned,
+        "identity_bridge_configured": configured,
+        "setup_message": setup_message,
+        "runtime": "Amazon Bedrock AgentCore Runtime" if runtime_provisioned else "not configured",
         "model": " → ".join(model_chain) if model_chain else "Anthropic → Mistral fallback chain (configured in AgentCore runtime)",
         "model_chain": model_chain,
         "retrieval": "Titan embeddings + OpenSearch Serverless vector index",
@@ -1158,7 +1168,7 @@ def run_aws_agent_demo(req: BedrockDemoRequest, request: Request):
     if req.scenario != "confidential_external_share":
         raise HTTPException(422, "unsupported AWS demo scenario")
     if not all(os.environ.get(key) for key in ("AGENTSAFE_AWS_BRIDGE_SECRET", "AWS_ROLE_ARN", "AGENTCORE_RUNTIME_ARN", "AGENTSAFE_AWS_REGION")):
-        raise HTTPException(503, "The live AWS workflow is not configured in this environment. Run the separately labeled local policy checks instead.")
+        raise HTTPException(503, aws_status()["setup_message"])
     if not os.environ.get("VERCEL_URL"):
         raise HTTPException(503, "The live AWS workflow requires the deployed Vercel identity bridge. Run the separately labeled local policy checks instead.")
     root_public, root_private = fresh_agent_key()

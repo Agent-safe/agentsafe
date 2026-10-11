@@ -14,12 +14,12 @@ The runtime has no business-tool credentials and cannot authorize the proposal. 
 
 The four-model chain is configured in `agentcore/agentcore.json` and `BEDROCK_MODEL_CHAIN`:
 
-1. `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`
-2. `eu.anthropic.claude-haiku-4-5-20251001-v1:0`
-3. `global.anthropic.claude-sonnet-4-6`
-4. `mistral.devstral-2-123b`
+1. `eu.anthropic.claude-sonnet-5-5`
+2. `eu.anthropic.claude-haiku-5-5`
+3. `global.anthropic.claude-sonnet-5-5`
+4. `eu.mistral.pixtral-large-2502-v1:0`
 
-The Research Agent prefers model 1, the Security Analyst prefers model 3, and the Action Planner prefers model 2. Each role tries its preferred model first, then the remaining configured models in order. This keeps Anthropic first and Mistral as the last fallback. Empty responses, provider errors, and invalid planner JSON trigger the next model. The workflow fails closed after the chain is exhausted. AWS Converse smoke checks in the workshop session returned `OK` for all four IDs; this is a model-access check, not a live AgentCore deployment check.
+The Research Agent prefers model 1, the Security Analyst prefers model 3, and the Action Planner prefers model 2. Each role tries its preferred model first, then the remaining configured models in order. This keeps Anthropic first and Mistral as the last fallback. Empty responses, provider errors, and invalid planner JSON trigger the next model. The workflow fails closed after the chain is exhausted. Mistral Pixtral must be invoked through the EU inference profile; its raw foundation-model ID does not support on-demand invocation. The Anthropic first-use details were submitted, but successful live inference remains a separate verification step.
 
 The AWS model catalog also listed `mistral.pixtral-large-2502-v1:0`, but direct on-demand invocation returned an error requiring an inference profile. It is intentionally excluded from the working chain.
 
@@ -32,7 +32,7 @@ The AWS model catalog also listed `mistral.pixtral-large-2502-v1:0`, but direct 
 - Runtime entrypoint: `app/AgentSafeOrchestrator/main.py`.
 - Policy data: short synthetic AgentSafe rules only. Do not index customer data, personal data, or workshop-provided materials.
 
-The runtime and OpenSearch collection incur AWS usage. The dashboard must describe AWS as unavailable until the runtime, index, and Vercel OIDC bridge are configured and the end-to-end request succeeds.
+The runtime and OpenSearch collection incur AWS usage. Both resources are deployed, but AWS Organizations denied creation of the Vercel OIDC identity provider. The dashboard must describe AWS as unavailable until the workshop account administrator permits an approved bridge and the end-to-end request succeeds.
 
 ## Commands
 

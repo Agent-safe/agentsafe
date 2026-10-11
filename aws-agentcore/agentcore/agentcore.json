@@ -18,8 +18,9 @@
       "protocol": "HTTP",
       "envVars": [
         { "name": "AWS_REGION", "value": "eu-north-1" },
-        { "name": "BEDROCK_MODEL_CHAIN", "value": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0,eu.anthropic.claude-haiku-4-5-20251001-v1:0,global.anthropic.claude-sonnet-4-6,mistral.devstral-2-123b" },
+        { "name": "BEDROCK_MODEL_CHAIN", "value": "eu.anthropic.claude-sonnet-5-5,eu.anthropic.claude-haiku-5-5,global.anthropic.claude-sonnet-5-5,eu.mistral.pixtral-large-2502-v1:0" },
         { "name": "BEDROCK_EMBEDDING_MODEL_ID", "value": "amazon.titan-embed-text-v2:0" },
+        { "name": "AGENTSAFE_OPENSEARCH_ENDPOINT", "value": "https://0xlz5f5o1g6t87zj23o6.aoss.eu-north-1.on.aws" },
         { "name": "AGENTSAFE_OPENSEARCH_INDEX", "value": "agentsafe-policy-guidance" }
       ],
       "lifecycleConfiguration": {

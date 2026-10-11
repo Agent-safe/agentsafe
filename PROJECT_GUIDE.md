@@ -10,7 +10,7 @@ The hosted demo represents Acme Commerce, a fictional company. Agents, invoices,
 
 Use the live console at <https://agentsafe-nu.vercel.app>. The overview explains the product, then the workflow page separates AWS model calls from deterministic local policy checks. Agent permissions, groups and missions, audit evidence, and alerts are separate pages so an operator can find the relevant function quickly.
 
-The AWS workflow only runs when AgentCore, OpenSearch, Bedrock access, and the Vercel OIDC bridge are configured. A model availability smoke test alone does not establish that the runtime path is live. A successful workflow request and its persisted controller decision are the proof. Local policy checks are deterministic, do not call an LLM, and label their artifacts as synthetic.
+The AWS AgentCore runtime and OpenSearch Serverless collection are provisioned in the workshop account. The Vercel production function still lacks an AWS identity bridge: AWS Organizations denied creation of the Vercel OIDC identity provider. Therefore, the hosted AWS button remains unavailable until the workshop administrator permits that trust setup or provides an approved bridge. A successful workflow request and its persisted controller decision are the proof of end-to-end readiness. Local policy checks are deterministic, do not call an LLM, and label their artifacts as synthetic.
 
 ## Request path
 
@@ -59,7 +59,7 @@ flowchart TB
 
 ## AWS model chain
 
-The AWS-backed workflow uses four Bedrock models in this order: Claude Sonnet 4.5, Claude Haiku 4.5, Claude Sonnet 4.6, and Mistral Devstral 2 123B. The Research Agent prefers Sonnet 4.5, the Security Analyst prefers Sonnet 4.6, and the Action Planner prefers Haiku 4.5 for constrained JSON. Each role tries its own preferred model first, then the other models in configured order. Anthropic stays ahead of Mistral. Empty output and invalid planner JSON trigger fallback. If the chain is exhausted, the request fails closed. The UI records each step's selected model and failure attempts.
+The deployed runtime is configured with four Bedrock IDs: `eu.anthropic.claude-sonnet-5-5`, `eu.anthropic.claude-haiku-5-5`, `global.anthropic.claude-sonnet-5-5`, and `eu.mistral.pixtral-large-2502-v1:0`. Each specialist tries its role preference first, then the rest of this chain. Anthropic precedes Mistral. Provider errors, empty output, and invalid planner JSON trigger fallback. If the chain is exhausted, the runtime fails closed. The Anthropic first-use form has been submitted; model invocation still needs to succeed in the live runtime before this chain can be called verified.
 
 ## Local development
 

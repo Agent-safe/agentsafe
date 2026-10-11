@@ -33,14 +33,14 @@ def main() -> None:
     auth = AWSV4SignerAuth(credentials, REGION, "aoss")
     client = OpenSearch(hosts=[{"host": parsed.hostname, "port": 443}], http_auth=auth, use_ssl=True, verify_certs=True, connection_class=RequestsHttpConnection, timeout=10)
     bedrock = session.client("bedrock-runtime", region_name=REGION)
-    if not client.indices.exists(INDEX):
-        client.indices.create(INDEX, body={"settings": {"index": {"knn": True}}, "mappings": {"properties": {"title": {"type": "text"}, "rule_id": {"type": "keyword"}, "guidance": {"type": "text"}, "embedding": {"type": "knn_vector", "dimension": 1024, "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"}}}}})
+    if not client.indices.exists(index=INDEX):
+        client.indices.create(index=INDEX, body={"settings": {"index": {"knn": True}}, "mappings": {"properties": {"title": {"type": "text"}, "rule_id": {"type": "keyword"}, "guidance": {"type": "text"}, "embedding": {"type": "knn_vector", "dimension": 1024, "space_type": "l2"}}}})
     for index, doc in enumerate(DOCS):
         response = bedrock.invoke_model(modelId=EMBEDDING_MODEL_ID, contentType="application/json", accept="application/json", body=json.dumps({"inputText": doc["title"] + ". " + doc["guidance"], "dimensions": 1024, "normalize": True}))
         vector = json.loads(response["body"].read()).get("embedding")
         if not isinstance(vector, list) or len(vector) != 1024:
             raise RuntimeError("Titan embedding response was invalid")
-        client.index(index=INDEX, id=doc["rule_id"], body={**doc, "embedding": vector}, refresh=True)
+        client.index(index=INDEX, id=doc["rule_id"], body={**doc, "embedding": vector})
     print(json.dumps({"index": INDEX, "documents_seeded": len(DOCS), "source": "synthetic AgentSafe policy guidance"}))
 
 

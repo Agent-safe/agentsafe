@@ -1,0 +1,11 @@
+[project]
+name = "agentsafe-orchestrator"
+version = "0.1.0"
+description = "AgentSafe Bedrock AgentCore proposal-only multi-agent runtime"
+requires-python = ">=3.10"
+dependencies = [
+  "bedrock-agentcore>=1.4,<2",
+  "boto3>=1.38,<2",
+  "opensearch-py>=2.8,<4",
+  "strands-agents>=1.0,<2",
+]
