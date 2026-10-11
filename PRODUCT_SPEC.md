@@ -1,63 +1,115 @@
-# AgentSafe Product Specification
+# AgentSafe product specification
 
-## Product
+## Product goal
 
-AgentSafe is a control and audit layer for existing AI agents. It governs mission-scoped permissions, delegation, tool access, budgets, data movement, and required approvals. An agent proposes an action; the controller checks the signed mandate before a protected connector can run. Actions that bypass the controller are outside the protection boundary.
+Help a company see what its AI agents may do, stop unsafe actions before protected tools run, and retain evidence of the controller's decision.
 
-The console separates execution relationships (agents, tools, transfers) from authorization relationships (who delegated which rights). An operator can suspend a mission or revoke a mandate to stop future actions; revocation cannot undo completed actions.
+AgentSafe is an authorization layer around existing agent workflows. Agents propose. AgentSafe checks the signature, mission, tool, resource, parameters, budget, expiry, revocation state, data destination, and required approval. A connector can run only after the controller durably records an allow decision.
 
-## Demo company
+## Demo tenant
 
-The hosted demonstration represents a fictional company and uses synthetic agent identities, invoices, policy notes, and connector results. State is persisted in the configured database and is read back from the API; it is not a hard-coded activity feed. The mock connectors write local demo artifacts only. They do not send messages, contact suppliers, or move money.
+The application uses **Acme Commerce**, a fictional online retailer. All agents, staff, supplier, invoice, policy notes, and business results in the tenant are synthetic. The controller database is shared and persistent. The available connectors do not call real business systems.
 
-## Product guarantees demonstrated
+The named specialists are `ag-policy-researcher`, `ag-data-guardian`, and `ag-procurement-planner`. Their generated content remains untrusted input to the controller.
 
-- Each protected operation is tied to a mission and signed mandate scoped by tools, resources, budgets, expiry, and delegation rights.
-- A child mandate cannot expand the encoded parent scope, budget, expiry, or delegation/data flags.
-- Cumulative budgets are checked atomically; request identifiers cannot be replayed.
-- Confidential data transfers are checked against declared labels and destinations.
-- A required exact-operation approval must exist and be unused before the protected operation is allowed.
-- The allow/deny decision is durably journaled before connector execution. Journal-write failure blocks the action.
-- Signed receipts describe what the controller checked or observed. They do not prove model reasoning or the truth of a tool response.
+## Product workflow
 
-## Demo journey
+```mermaid
+sequenceDiagram
+  participant A as Agent workflow
+  participant C as AgentSafe controller
+  participant G as Signed mission grant
+  participant D as Demo connector
+  participant J as PostgreSQL audit journal
+  A->>C: Signed request with unique ID and exact parameters
+  C->>G: Verify identity, signature, scope, and delegation
+  C->>C: Check expiry, revocation, budget, data policy, approval, replay
+  C->>J: Write decision before connector call
+  alt Allowed and durable write succeeded
+    C->>D: Execute the checked synthetic operation
+    D-->>C: Return synthetic result
+    C->>J: Record result and signed receipt
+  else Denied or write failed
+    C-->>A: Stop with a reason; no connector call
+  end
+```
 
-1. Create a mission mandate with a tool scope, resources, limits, budget, expiry, and delegation setting.
-2. Delegate a narrower child mandate. The prototype generates and independently verifies a Groth16 proof for the encoded parent-child relation.
-3. Run a workflow. The AWS path uses three specialist agents to produce a proposal; the AgentSafe controller independently evaluates it. The local path runs deterministic policy cases without an LLM call.
-4. Inspect an allowed internal action and blocked confidential external transfer, missing approval, budget overrun, replay, or post-revocation action.
-5. Inspect the signed JSONL audit events, verify the journal, and use the kill switch to stop future actions.
+## Requirements represented in the prototype
 
-## AI workflow and model routing
+- A mission grant names an agent, tools, resources, limits, a cumulative budget, expiry, and delegation rights.
+- A child grant cannot expand the constraints encoded by its parent.
+- The delegation circuit creates a Groth16 proof and independently verifies it before issuing the delegated grant.
+- Every protected request includes a unique ID and an Ed25519 signature.
+- The controller checks replay, scope, expiration, revocation, budget, destination, and approval.
+- Cumulative budgets are checked in a serialized database transaction.
+- A decision is saved before connector execution. Persistence failure blocks the action.
+- Results and receipts distinguish what the controller observed from what it cannot prove.
+- Events are Ed25519-signed and linked by a SHA-256 hash chain; JSONL can be exported.
+- A security operator can revoke future authority for a grant and its descendants.
+- A salted journal fingerprint can be anchored to the real Avalanche Fuji testnet contract after explicit wallet confirmation.
+- The live public AWS workflow is limited to ten runs per UTC day.
 
-Amazon Bedrock AgentCore Runtime hosts three sequential Strands agents: Research Agent, Security Analyst Agent, and Action Planner Agent. Amazon Bedrock runs inference. Amazon Titan creates embeddings and OpenSearch Serverless retrieves synthetic policy guidance. The runtime can propose actions but has no business-tool credentials; FastAPI remains the authorization boundary.
+## AI workflow and current AWS runtime
 
-Four Bedrock model IDs are configured in provider order: `eu.anthropic.claude-sonnet-5-5`, `eu.anthropic.claude-haiku-5-5`, `global.anthropic.claude-sonnet-5-5`, and the EU Mistral inference profile `eu.mistral.pixtral-large-2502-v1:0`. Role preferences specialize the primary model: Sonnet for research, a separate Anthropic model for security review, and Haiku for structured planning. Each role then tries the remaining configured models. Provider errors, empty output, and invalid planner JSON trigger fallback. A direct runtime probe reached model invocation but failed: Anthropic access was denied and Mistral was throttled. The chain is configured but not verified as working. The Anthropic first-use details were submitted to AWS; Mistral requires its EU inference-profile ID, not the raw foundation-model ID.
+The AWS Workshop role denies AgentCore runtime API access. The live path therefore uses AWS Lambda, LangGraph, and direct Amazon Bedrock Converse calls. No Vercel identity bridge is involved.
 
-The AgentCore runtime and OpenSearch collection are deployed in AWS. AWS Organizations denied creation of the OIDC provider needed for Vercel to assume a narrowly scoped role, so hosted Vercel cannot invoke that runtime yet. The dashboard must keep the AWS workflow unavailable until an approved identity bridge exists and a real end-to-end request plus persisted controller decision succeeds.
+The graph runs these specialists in order:
 
-## Components
+1. `ag-policy-researcher` summarizes synthetic rules for the scenario.
+2. `ag-data-guardian` reviews the requested transfer destination.
+3. `ag-procurement-planner` returns an untrusted action proposal.
 
-| Component | Prototype technology | Responsibility |
-| --- | --- | --- |
-| Controller and API | Python, FastAPI, Pydantic | Validate signed mandates and requests, enforce rules, call only local demo connectors |
-| Durable state | Supabase PostgreSQL via the session pooler when hosted; SQLite for isolated local development | Store mandates, budgets, alerts, approvals, artifacts, and journal events |
-| Authorization signatures | Ed25519 | Sign mandates, agent requests, and controller receipts |
-| Event integrity | SHA-256 chain and Ed25519 signatures | Detect edits to exported event history |
-| Delegation privacy | Circom 2, circomlib/Poseidon, Groth16, snarkjs | Prove the bounded parent-child relation at delegation time |
-| Agent orchestration | AWS Bedrock AgentCore with Strands Agents | Run specialist proposal agents in the AWS-backed path |
-| Policy retrieval | Bedrock Titan embeddings and OpenSearch Serverless | Retrieve synthetic rule guidance for the agents |
-| Dashboard | React, TypeScript, Material UI, Vite | Separate mission, workflow, access, audit, and response views |
-| Hosted demo | Vercel | Serve the controller and console; isolate Node proof/AWS bridge functions |
+Each specialist uses this fallback order:
 
-Private signing keys stay with the signing components, not in prompts. Raw document and prompt content is not copied into the audit journal. Low-entropy private values are represented using keyed commitments.
+1. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+2. `us.mistral.pixtral-large-2502-v1:0`
+3. `us.amazon.nova-lite-v1:0`
+4. `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+5. `global.amazon.nova-2-lite-v1:0`
 
-## Security and product limits
+If a model fails or returns unusable content, the next model is tried. If all five fail, the workflow stops and no proposal is authorized. A valid proposal still has to pass the separate deterministic controller. OpenSearch is not provisioned; synthetic policy notes are bundled with the service. The product does not claim vector retrieval.
 
-The journal is signed and hash-chained, but an administrator who controls the database can delete an uncheckpointed tail. A signature authenticates a data label supplied by a caller; it does not prove that the source classified the data correctly. The one-party Groth16 development setup is not an audited trusted setup. Human approvals are demo interactions, not enterprise identity management. Group member names are a roster; the prototype does not mint per-member cryptographic credentials. JSONL export is SIEM-friendly output, not a live Splunk, Sentinel, or Datadog integration. No real company connector is enabled.
+## Screens
 
-The audit screen anchors a salted journal-head commitment to the deployed Fuji `AuditAnchor` contract through MetaMask. The controller confirms it only after checking the transaction receipt and emitted root event. This proves that the commitment was recorded at a chain height; it does not make the private journal contents public or prove that tool execution was truthful.
+| Screen | Purpose |
+| --- | --- |
+| Overview | Show the company context, recent actions, and control health |
+| Run a workflow | Choose Bedrock-backed specialist calls or deterministic policy checks |
+| Agent permissions | Inspect a grant, its limits, and revoke it |
+| Groups & missions | Review mission budgets and synthetic group rosters |
+| Audit evidence | Verify signatures and event hashes, export JSONL, and optionally anchor a checkpoint |
+| Alerts & response | Explain blocked requests and stop future actions |
 
-## Current deployment boundary
+## Technical components
 
-The `controller/` app is the intended hosted product. It includes the FastAPI controller, console, PostgreSQL persistence, separate Groth16 endpoint, and AWS bridge. Deployment state and end-to-end AWS readiness must be verified against the current Vercel production deployment before describing the AWS path as live. Keep documented status tied to a production health check and a successful workflow invocation.
+| Concern | Prototype implementation |
+| --- | --- |
+| UI | React, TypeScript, Material UI, Vite |
+| API and policy controller | Python, FastAPI, Pydantic |
+| Hosted persistence | Supabase PostgreSQL session pooler |
+| Local isolated storage | SQLite |
+| Hosted runtime | AWS Lambda container |
+| Agent graph | LangGraph |
+| Inference | Amazon Bedrock Converse with five model fallbacks |
+| Mandate and receipt authentication | Ed25519 |
+| Journal linkage | SHA-256 hash chain |
+| Delegation proof | Circom 2, Poseidon, Groth16, snarkjs |
+| Optional external checkpoint | Avalanche Fuji `AuditAnchor` |
+
+The Lambda function reads only the database URL and signing key from a Secrets Manager secret. Its role is scoped to that secret, CloudWatch log writes, and the five Bedrock model families. The browser does not receive secret material.
+
+## Out of scope and limitations
+
+- No actual email, purchase, finance, supplier, identity-provider, SIEM, or SOAR integration is enabled.
+- The fictional company profile is not connected to an external company's private network or systems.
+- Human approval is a synthetic demonstration and does not authenticate a real employee.
+- Group rosters do not issue individual cryptographic credentials or prove a shared group budget across real agents.
+- Data labels are supplied by trusted integration code; the signature cannot prove that the initial label is correct.
+- A journal chain detects modification of retained history but cannot stop an administrator deleting an unanchored tail.
+- A Fuji checkpoint proves a commitment was recorded on a test network, not that an event was true or a policy was correct.
+- The one-party Groth16 setup is for development, not an audited production trusted setup.
+- Availability, key rotation/recovery, tenant isolation, authenticated administration, and independent security review are not production complete.
+
+## Success criteria
+
+The demo is complete when the AWS URL serves the Material UI dashboard, reads the persisted Acme company state, reports the live Bedrock/LangGraph route truthfully, completes a real model-backed workflow, receives a blocked decision from the independent AgentSafe controller, persists and verifies the resulting signed journal events, and runs the deterministic policy checks against the same company database.

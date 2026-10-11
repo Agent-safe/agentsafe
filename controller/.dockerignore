@@ -1,0 +1,13 @@
+.env*
+.vercel/
+.data/
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+zk/node_modules/
+ui-app/
+api/
+*.sqlite3
+*.log
+.git/

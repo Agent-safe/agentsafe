@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentSafe demo controller on AWS Lambda with direct Bedrock model access.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: Immutable ECR image URI for the AgentSafe controller.
+  DatabaseSecretArn:
+    Type: String
+    Description: Secrets Manager secret containing DATABASE_URL and AGENTSAFE_SIGNING_KEY_B64.
+  AllowedHost:
+    Type: String
+    Description: Hostname from the generated Lambda Function URL, without a scheme.
+
+Resources:
+  ControllerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/agentsafe-controller
+      RetentionInDays: 7
+
+  ControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: agentsafe-controller-runtime
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: agentsafe-controller-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteControllerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/agentsafe-controller:*
+              - Sid: ReadControllerDatabaseSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+              - Sid: InvokeConfiguredBedrockModels
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.mistral.pixtral-large-2502-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-lite-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.amazon.nova-2-lite-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/mistral.pixtral-large-2502-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/amazon.nova-lite-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:::foundation-model/amazon.nova-2-lite-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.nova-2-lite-v1:0
+      Tags:
+        - Key: app
+          Value: agentsafe-demo
+
+  ControllerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ControllerLogGroup
+    Properties:
+      FunctionName: agentsafe-controller
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      Role: !GetAtt ControllerRole.Arn
+      Architectures:
+        - x86_64
+      MemorySize: 2048
+      Timeout: 300
+      ReservedConcurrentExecutions: 2
+      EphemeralStorage:
+        Size: 1024
+      Environment:
+        Variables:
+          AGENTSAFE_AWS_NATIVE: "1"
+          AGENTSAFE_AWS_MAX_RUNS_PER_DAY: "10"
+          AGENTSAFE_ALLOWED_HOSTS: !Ref AllowedHost
+          AGENTSAFE_DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          AGENTSAFE_DATA_DIR: /tmp/agentsafe
+          AGENTSAFE_ZK_DIR: /var/task/zk
+          BEDROCK_MODEL_CHAIN: us.anthropic.claude-sonnet-4-5-20250929-v1:0,us.mistral.pixtral-large-2502-v1:0,us.amazon.nova-lite-v1:0,us.anthropic.claude-haiku-4-5-20251001-v1:0,global.amazon.nova-2-lite-v1:0
+      Tags:
+        - Key: app
+          Value: agentsafe-demo
+
+  ControllerFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref ControllerFunction
+      AuthType: NONE
+
+  AllowPublicFunctionUrl:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ControllerFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  AllowPublicFunctionInvocationViaUrl:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ControllerFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  ControllerUrl:
+    Description: Public HTTPS URL for the AgentSafe demo controller and dashboard.
+    Value: !GetAtt ControllerFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref ControllerFunction

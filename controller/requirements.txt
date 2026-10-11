@@ -3,3 +3,5 @@ uvicorn>=0.34,<1
 cryptography>=44,<47
 langgraph>=0.3,<2
 psycopg[binary]>=3.2,<4
+boto3>=1.39,<2
+mangum>=0.19,<1

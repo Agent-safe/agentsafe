@@ -1,45 +1,62 @@
 # AgentSafe
 
-AgentSafe is a security control layer for AI agents. The agent proposes an action; AgentSafe checks its signed mission authority, tool scope, data route, budget, expiry, revocation, and required approval before a protected connector can run. The controller records the decision and returns a signed receipt.
+AgentSafe is a safety checkpoint between an AI agent and the tools it can use. The agent suggests an action. AgentSafe checks the mission's signed permissions and company rules, then records whether the action was allowed. In this demo, every business record and tool result is made up; the controller, cryptographic checks, database, and AWS model calls are real when their status says they are connected.
 
-## Open the demo
+## Demo company
 
-Live console: <https://agentsafe-nu.vercel.app>
+The console opens in **Acme Commerce**, a fictional online retailer. It has named `ag-*` agents, procurement missions, a confidential invoice, a supplier, group policies, alerts, and a signed audit journal. The same company workspace appears throughout the app. The demo connectors only record pretend outcomes: they never send an email, contact a supplier, or move money.
 
-The demo company is **Acme Commerce**, a fictional workspace. Its agents, invoices, policy notes, and connector results are synthetic. App records are read from the API/database rather than invented as a hard-coded activity feed. Connectors create local demo artifacts only; they do not send mail, place purchases, or call real company systems.
+## Run a workflow
 
-The dashboard has separate views for the workflow, agent permissions, group missions, audit evidence, and alerts/response. Start with **Run a workflow**. The AWS workflow makes real Bedrock and OpenSearch calls only when its AgentCore runtime and Vercel-to-AWS identity are configured. The deterministic local policy suite does not call an LLM. Each option states which systems it uses. Check the status page and successful workflow record before describing the AWS path as live.
+The AWS path runs three named specialists in LangGraph and calls Amazon Bedrock directly. Anthropic is first, followed by Mistral, Nova Lite, Claude Haiku, and Nova 2 Lite as model fallbacks. The model can suggest a destination, but it cannot approve the transfer. AgentSafe checks the signed delegation and blocks a confidential invoice from going to personal email. A shared database limit caps the live workflow at ten runs per UTC day.
 
-## How it works
+The workshop role does not allow the AgentCore runtime APIs, and no OpenSearch collection was provisioned. Therefore, the live AWS route uses Lambda, LangGraph, and Bedrock Converse; its short policy notes are bundled with the demo. The local policy workflow is deterministic and makes no model call. Each card in the app states which systems it uses.
+
+## Product screens
+
+- **Overview:** company context, recent controller events, and policy health.
+- **Run a workflow:** run the Bedrock-backed specialists or deterministic policy scenarios.
+- **Agent permissions:** inspect mandates, scopes, budgets, expiry, delegation, and revocation.
+- **Groups & missions:** inspect shared policies and synthetic team rosters.
+- **Audit evidence:** verify signed events, export JSONL, and anchor a salted checkpoint to Avalanche Fuji.
+- **Alerts & response:** investigate blocked actions and revoke future authority.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  Agent[AI agent proposes] --> Controller[AgentSafe verifies mandate and policy]
-  Controller -->|deny| Audit[Signed decision and alert]
-  Controller -->|allow after durable journal write| Tool[Protected demo connector]
-  Tool --> Receipt[Signed result receipt]
-  Receipt --> Audit
-  Operator[Security operator] -->|revoke mission| Controller
+  Console[Material UI security console] --> API[FastAPI controller]
+  API --> DB[(Supabase PostgreSQL)]
+  API -->|AWS live workflow| Graph[LangGraph specialists in Lambda]
+  Graph -->|Converse with fallback chain| Bedrock[Amazon Bedrock]
+  Graph -->|untrusted proposal| API
+  API -->|verify signature, scope, data route, proof| Gate{Policy gate}
+  Gate -->|allow only after journal write| DemoTool[Synthetic demo connector]
+  Gate -->|allow or deny receipt| Journal[Ed25519 signed SHA-256 journal]
+  Journal --> Export[JSONL for a SIEM collector]
+  Journal -->|optional salted checkpoint| Fuji[Avalanche Fuji AuditAnchor]
+  Operator[Security operator] -->|revoke mission| API
 ```
 
-The AWS-backed workflow uses three sequential Strands agents hosted by Bedrock AgentCore: Research, Security Analyst, and Action Planner. Each role tries its preferred Anthropic model first; the configured four-model chain ends with the EU Mistral Pixtral inference profile. The model output remains an untrusted proposal; only the AgentSafe controller decides. See [`HOW_AGENTSAFE_WORKS.md`](HOW_AGENTSAFE_WORKS.md) for detailed sequence and model-routing diagrams. The AWS runtime and OpenSearch collection are provisioned, but the hosted Vercel-to-AWS identity bridge is not enabled in this workshop account yet, so the production AWS button must remain unavailable.
+## Technology
 
-## Stack
+| Part | Technology | What it does |
+| --- | --- | --- |
+| Controller and API | Python, FastAPI, Pydantic | Enforce the policy and record the decision |
+| Hosted persistence | Supabase PostgreSQL session pooler | Store the demo company's missions and audit history |
+| Agent workflow | LangGraph on AWS Lambda | Run named specialist steps and manage model fallback |
+| Model calls | Amazon Bedrock Converse | Generate analysis and an untrusted action proposal |
+| Model order | Claude Sonnet → Mistral Pixtral → Nova Lite → Claude Haiku → Nova 2 Lite | Try the preferred provider first and fall back if it fails |
+| Dashboard | React, TypeScript, Material UI, Vite | Show company operations and let an analyst respond |
+| Delegation privacy | Circom, Poseidon, Groth16, snarkjs | Prove selected parent/child mandate constraints |
+| Signatures and journal | Ed25519, SHA-256 | Authenticate mandates and make journal edits detectable |
+| Optional external checkpoint | Avalanche Fuji | Record a salted fingerprint of a journal head |
 
-| Area | Technology |
-| --- | --- |
-| Controller/API | Python, FastAPI, Pydantic |
-| Persistence | Supabase PostgreSQL via transaction pooler; SQLite for isolated development |
-| Agent orchestration | Amazon Bedrock AgentCore Runtime, Strands Agents |
-| Model routing | Amazon Bedrock: EU Claude Sonnet 5.5 → EU Claude Haiku 5.5 → Global Claude Sonnet 5.5 → EU Mistral Pixtral Large 25.02 |
-| Policy retrieval | Titan embeddings and OpenSearch Serverless |
-| Delegation proof | Circom 2, Poseidon, Groth16, snarkjs |
-| Signatures and journal | Ed25519, SHA-256 hash chain |
-| Hosting | Vercel FastAPI with separate Node proof and AWS bridge functions |
+AgentCore and OpenSearch are not active in the workshop deployment. The prototype does not include real company connectors, SIEM delivery, authenticated enterprise approvers, or production ZK parameters.
 
-## Local run
+## Development
 
-Requirements: Python 3.10+, Node.js 20+, npm, and [`uv`](https://docs.astral.sh/uv/).
+The hosted AWS demo is the primary live path. For isolated development, use Python 3.10+, Node.js 20+, npm, and `uv`:
 
 ```bash
 cd controller
@@ -49,36 +66,15 @@ npm run build
 uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-Open <http://127.0.0.1:8765>. For development policy setup, `npm run build` prepares the local Groth16 artifacts. This one-party setup is not a production trusted ceremony. The controller fails closed if proof generation or verification fails.
+The proof setup in `controller/zk/build` is a one-party development setup. It is useful for demonstrating the circuit but is not an audited production ceremony. If the database URL is not configured, local development uses SQLite.
 
-## Verification
+## Security boundaries
 
-Run the checks from the `controller/` directory:
+- Agents propose actions; only the controller authorizes them.
+- Protected tools must not keep a second credential path that lets an agent bypass the controller.
+- A journal signature proves which controller key signed an event. It does not prove the model reasoned correctly or that an external tool response was true.
+- A hash chain makes changes to recorded history detectable. A database administrator can still delete the newest events unless a checkpoint has been stored elsewhere.
+- A Fuji checkpoint contains a salted commitment, not the journal contents. Wallet confirmation and test AVAX are required; the transaction value is zero.
+- Synthetic demo data should not be mistaken for a customer's internal systems or records.
 
-```bash
-uv run pytest -q
-npm run build
-```
-
-Export and independently validate the journal:
-
-```bash
-curl http://127.0.0.1:8765/journal/export > /tmp/agentsafe-journal.json
-uv run python verify_export.py /tmp/agentsafe-journal.json
-```
-
-A valid export verifies signatures and SHA-256 links. Without a separately held external checkpoint, a database administrator could delete an uncheckpointed journal tail.
-
-The Fuji contract address is `0xde5648cded04c9eca1124234867780604f89ff7e` on chain ID 43113. Anchoring requires MetaMask confirmation and test AVAX for gas; the transaction value is zero. The database retains the random salt needed to verify the commitment, while the chain stores only the salted SHA-256 commitment.
-
-## Implementation limits
-
-- The demo has no real email, purchase, or enterprise connector.
-- The human approval interaction is a demo issuer, not authenticated enterprise identity management.
-- Group rosters are descriptive; individual derived member credentials are not issued.
-- Data labels are supplied by signed callers; source classification is not independently attested.
-- JSONL output is SIEM-friendly, but no live SIEM integration is configured.
-- Audit evidence can be anchored to the deployed Avalanche Fuji `AuditAnchor` contract. The UI records an anchor as confirmed only after validating the Fuji transaction receipt and emitted commitment event.
-- Groth16 setup is development-only and not audited for production.
-
-See [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md), [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md), and [`HACKATHON_BRIEF.md`](HACKATHON_BRIEF.md).
+See [`HOW_AGENTSAFE_WORKS.md`](HOW_AGENTSAFE_WORKS.md) for the simple walkthrough and diagrams, [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) for the request path, and [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) for guarantees and limitations.

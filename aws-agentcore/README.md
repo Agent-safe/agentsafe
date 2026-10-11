@@ -1,39 +1,37 @@
-# AgentSafe AWS Multi-Agent Workflow
+# AWS workflow notes
 
-This AWS-backed workflow follows the ESSECKATHON stack and workshop pattern. Amazon Bedrock AgentCore Runtime hosts a Python orchestrator built with Strands Agents. Amazon Bedrock runs model inference, Titan creates embeddings, and Amazon OpenSearch Serverless retrieves synthetic policy notes.
+## Current deployment path
 
-## Specialist workflow
+The current AWS demo is an AWS Lambda container running the AgentSafe FastAPI controller and a three-step LangGraph workflow. It calls Amazon Bedrock directly through the Lambda execution role. It does not call Vercel, AgentCore Runtime, or OpenSearch.
 
-1. **Research Agent:** retrieve and summarize policy guidance relevant to the task.
-2. **Security Analyst Agent:** review the task, retrieved guidance, and bounded mandate summary.
-3. **Action Planner Agent:** return a constrained action proposal for the AgentSafe controller.
+The workshop participant role denies AgentCore runtime control operations. No OpenSearch collection was provisioned. The LangGraph workflow receives a few synthetic Acme Commerce rules bundled with the service. These limitations are shown in the workflow details rather than hidden behind an “online” badge.
 
-The runtime has no business-tool credentials and cannot authorize the proposal. The separate FastAPI controller validates signatures and mandates, records its decision, and remains the only authorization gate.
+The deployment template is [`lambda-stack.yaml`](lambda-stack.yaml). The container recipe and request handler are in `../controller/Dockerfile` and `../controller/lambda_handler.py`.
 
-## Model selection and fallback
+## Specialist graph and model chain
 
-The four-model chain is configured in `agentcore/agentcore.json` and `BEDROCK_MODEL_CHAIN`:
+1. `ag-policy-researcher` summarizes applicable synthetic rules.
+2. `ag-data-guardian` reviews the requested destination.
+3. `ag-procurement-planner` proposes a destination as untrusted model output.
 
-1. `eu.anthropic.claude-sonnet-5-5`
-2. `eu.anthropic.claude-haiku-5-5`
-3. `global.anthropic.claude-sonnet-5-5`
-4. `eu.mistral.pixtral-large-2502-v1:0`
+Each step tries these Amazon Bedrock Converse model IDs in order:
 
-The Research Agent prefers model 1, the Security Analyst prefers model 3, and the Action Planner prefers model 2. Each role tries its preferred model first, then the remaining configured models in order. This keeps Anthropic first and Mistral as the last fallback. Empty responses, provider errors, and invalid planner JSON trigger the next model. The workflow fails closed after the chain is exhausted. Mistral Pixtral must be invoked through the EU inference profile; its raw foundation-model ID does not support on-demand invocation. The Anthropic first-use details were submitted, but successful live inference remains a separate verification step.
+1. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+2. `us.mistral.pixtral-large-2502-v1:0`
+3. `us.amazon.nova-lite-v1:0`
+4. `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+5. `global.amazon.nova-2-lite-v1:0`
 
-The AWS model catalog also listed `mistral.pixtral-large-2502-v1:0`, but direct on-demand invocation returned an error requiring an inference profile. It is intentionally excluded from the working chain.
+The next model is tried after a provider error, empty response, or unusable planner output. If every configured option fails, the workflow stops. The AgentSafe controller still independently verifies the proposed action and saves its decision before an allowed connector call.
 
-## Deployment inputs
+## AWS deployment resources
 
-- AWS account: regular **Future Unicorn** account; do not deploy into the temporary Workshop Studio account.
-- Region: `eu-north-1`.
-- Embeddings: `amazon.titan-embed-text-v2:0`, 1024 dimensions.
-- Search: authenticated OpenSearch Serverless vector collection.
-- Runtime entrypoint: `app/AgentSafeOrchestrator/main.py`.
-- Policy data: short synthetic AgentSafe rules only. Do not index customer data, personal data, or workshop-provided materials.
+The CloudFormation stack creates one Lambda execution role, the Lambda function, and its HTTPS Function URL. The role is limited to writing that function's CloudWatch logs, reading the specified database/signing-key secret, and invoking the configured Bedrock models. The public demo uses synthetic records and allows at most ten live workflow runs per UTC day.
 
-The runtime and OpenSearch collection incur AWS usage. Both resources are deployed, but AWS Organizations denied creation of the Vercel OIDC identity provider. The dashboard must describe AWS as unavailable until the workshop account administrator permits an approved bridge and the end-to-end request succeeds.
+Create an ECR repository for the controller image, then build and push the image from the AWS Workshop CloudShell in `us-west-2`. Create the named Secrets Manager secret with `DATABASE_URL` and `AGENTSAFE_SIGNING_KEY_B64`, then deploy `lambda-stack.yaml` with the pushed image URI, secret ARN, and generated Function URL hostname. See the deployment notes in the repository README before changing this temporary workshop account.
 
-## Commands
+The Container Function URL is public so reviewers can open the dashboard without AWS credentials. Do not place real customer records in this demo. The event is temporary; remove the Lambda stack, image repository, and database secret when the hosted demo is no longer needed.
 
-From this directory, follow the AgentCore CLI and CDK instructions in `agentcore/cdk/README.md` for synth/deploy/status. The runtime uses the `app/AgentSafeOrchestrator/requirements.txt` dependency manifest. Deploy with the active AWS workshop account and `eu-north-1` region after reviewing the intended resources and IAM scope.
+## Older AgentCore experiment
+
+`agentcore/` contains the earlier AgentCore/Strands exploration. Its CDK scaffold is not the active runtime and must not be described as deployed. The workshop role did not permit AgentCore runtime operations, so the current implementation uses LangGraph on Lambda as the fallback orchestration path.
